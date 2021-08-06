@@ -144,6 +144,8 @@ class UrlBarMediator implements UrlBar.UrlBarTextContextMenuDelegate {
     }
 
     private void pushTextToModel() {
+        if (mUrlBarData == null)
+          return;
         CharSequence text =
                 !mHasFocus ? mUrlBarData.displayText : mUrlBarData.getEditingOrDisplayText();
         CharSequence textForAutofillServices = text;
