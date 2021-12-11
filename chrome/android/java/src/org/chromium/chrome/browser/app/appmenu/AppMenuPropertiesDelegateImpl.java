@@ -433,6 +433,21 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 }
             }
             modelList.add(new MVCListAdapter.ListItem(menutype, propertyModel));
+
+            // If we gave to show extensions first, we append them after the first row that has 5 action buttons
+            if (ContextUtils.getAppSharedPreferences().getBoolean("show_extensions_first", false)
+                && item.getItemId() == R.id.icon_row_menu_id
+                && menutype == AppMenuItemType.FIVE_BUTTON_ROW) {
+                    for (int j = 0; j < extensionMenu.size(); ++j) {
+                        MenuItem extensionItem = extensionMenu.getItem(j);
+                        if (!extensionItem.isVisible()) continue;
+                        PropertyModel extensionPropertyModel = AppMenuUtil.menuItemToPropertyModel(extensionItem);
+                        extensionPropertyModel.set(AppMenuItemProperties.ICON_COLOR_RES, getMenuItemIconColorRes(extensionItem));
+                        extensionPropertyModel.set(AppMenuItemProperties.SUPPORT_ENTER_ANIMATION, true);
+
+                        modelList.add(new MVCListAdapter.ListItem(AppMenuItemType.STANDARD, extensionPropertyModel));
+                    }
+               }
         }
         int lastIndex = modelList.size() - 1;
         int itemId = modelList.get(lastIndex).model.get(AppMenuItemProperties.MENU_ITEM_ID);
