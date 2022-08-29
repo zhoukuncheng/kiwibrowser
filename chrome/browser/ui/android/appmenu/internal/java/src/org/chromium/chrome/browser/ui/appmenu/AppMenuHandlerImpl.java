@@ -41,6 +41,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.chromium.base.Log;
+
 /**
  * Object responsible for handling the creation, showing, hiding of the AppMenu and notifying the
  * AppMenuObservers about these actions.
@@ -65,6 +67,8 @@ class AppMenuHandlerImpl
     private ListObserver<Void> mListObserver;
     private Callback<Integer> mTestOptionsItemSelectedListener;
     private KeyboardVisibilityDelegate.KeyboardVisibilityListener mKeyboardVisibilityListener;
+
+    private ModelList mModelList;
 
     /**
      * The resource id of the menu item to highlight when the menu next opens. A value of {@code
@@ -368,7 +372,21 @@ class AppMenuHandlerImpl
             mTestOptionsItemSelectedListener.onResult(itemId);
             return;
         }
-
+        String lastItemTitle = "";
+        String lastVisibleItemTitle = "";
+        int menuSize = mModelList.size();
+        for (int i = 0; i < menuSize; i++) {
+            if (mModelList.get(i).model.get(AppMenuItemProperties.MENU_ITEM_ID) == itemId) {
+                Log.d("Kiwi", "Comparing Menu Size of Size: " + menuSize + " and ID: " + mModelList.get(i).model.get(AppMenuItemProperties.MENU_ITEM_ID) + " and itemId: " + itemId);
+                CharSequence titleCondensed = mModelList.get(i).model.get(AppMenuItemProperties.TITLE_CONDENSED);
+                lastItemTitle = titleCondensed.toString();
+                CharSequence title = mModelList.get(i).model.get(AppMenuItemProperties.TITLE);
+                lastVisibleItemTitle = title.toString();
+                break;
+            }
+        }
+        mAppMenuDelegate.setLastItemTitle(lastItemTitle);
+        mAppMenuDelegate.setLastVisibleItemTitle(lastVisibleItemTitle);
         mAppMenuDelegate.onOptionsItemSelected(itemId, mDelegate.getBundleForMenuItem(itemId));
     }
 

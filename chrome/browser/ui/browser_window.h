@@ -29,6 +29,7 @@
 #include "chrome/browser/ui/user_education/browser_user_education_interface.h"
 #include "chrome/browser/ui/webui/tab_search/tab_search.mojom.h"
 #include "chrome/common/buildflags.h"
+#include "components/strings/grit/components_strings.h"
 #include "components/content_settings/core/common/content_settings_types.h"
 #include "components/translate/core/common/translate_errors.h"
 #include "ui/base/base_window.h"
@@ -38,8 +39,10 @@
 #include "ui/gfx/native_widget_types.h"
 #include "url/origin.h"
 
+#if 0
 #if BUILDFLAG(IS_ANDROID)
 #error This file should only be included on desktop.
+#endif
 #endif
 
 class Browser;
