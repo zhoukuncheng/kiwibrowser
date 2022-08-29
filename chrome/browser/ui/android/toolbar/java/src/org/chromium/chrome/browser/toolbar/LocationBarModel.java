@@ -195,6 +195,15 @@ public class LocationBarModel implements ToolbarDataProvider, LocationBarDataPro
 
     /** Handle any initialization that must occur after native has been initialized. */
     public void initializeWithNative() {
+        mOptimizationsEnabled =
+                ChromeFeatureList.isEnabled(ChromeFeatureList.LOCATION_BAR_MODEL_OPTIMIZATIONS);
+        mLastUsedNonOTRProfile = Profile.getLastUsedRegularProfile();
+        if (mOptimizationsEnabled) {
+            mSpannableDisplayTextCache = new LruCache<>(LRU_CACHE_SIZE);
+            mChromeAutocompleteSchemeClassifier =
+                    new ChromeAutocompleteSchemeClassifier(getProfile());
+        }
+
         mNativeLocationBarModelAndroid = LocationBarModelJni.get().init(LocationBarModel.this);
         mSpannableDisplayTextCache = new LruCache<>(LRU_CACHE_SIZE);
     }

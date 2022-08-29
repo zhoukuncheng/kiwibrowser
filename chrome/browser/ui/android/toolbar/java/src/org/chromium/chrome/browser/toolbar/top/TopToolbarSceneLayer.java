@@ -61,6 +61,10 @@ class TopToolbarSceneLayer extends SceneOverlayLayer {
             return;
         }
 
+        if (ChromeFeatureList.isEnabled(ChromeFeatureList.DISABLE_COMPOSITED_PROGRESS_BAR)) {
+            return;
+        }
+
         DrawingInfo progressInfo = model.get(TopToolbarOverlayProperties.PROGRESS_BAR_INFO);
         if (progressInfo == null) return;
 

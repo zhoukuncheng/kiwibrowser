@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Build.VERSION;
@@ -46,6 +47,7 @@ import org.chromium.chrome.browser.profiles.ProfileManagerUtils;
 import org.chromium.chrome.browser.ui.device_lock.MissingDeviceLockLauncher;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager.SnackbarManageable;
+import org.chromium.components.browser_ui.accessibility.AccessibilitySettings;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetControllerFactory;
 import org.chromium.components.browser_ui.bottomsheet.ManagedBottomSheetController;
@@ -126,6 +128,9 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
 
     private static final String MAIN_FRAGMENT_TAG = "settings_main";
 
+    @Nullable
+    private UiConfig mUiConfig;
+
     @SuppressLint("InlinedApi")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -186,6 +191,8 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
                     .commit();
         }
 
+        // Set width constraints
+        configureWideDisplayStyle();
         setStatusBarColor();
         initBottomSheet();
 
@@ -613,5 +620,10 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
                             className.hashCode(),
                             className));
         }
+    }
+
+    @Override
+    protected ModalDialogManager createModalDialogManager() {
+        return new ModalDialogManager(new AppModalPresenter(this), ModalDialogType.APP);
     }
 }
