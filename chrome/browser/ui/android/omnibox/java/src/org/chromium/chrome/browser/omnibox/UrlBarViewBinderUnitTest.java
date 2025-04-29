@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 
 import static org.chromium.chrome.browser.omnibox.UrlBarProperties.HINT_TEXT;
 import static org.chromium.chrome.browser.omnibox.UrlBarProperties.HINT_TEXT_COLOR;
+import static org.chromium.chrome.browser.omnibox.UrlBarProperties.IS_IN_CCT;
 import static org.chromium.chrome.browser.omnibox.UrlBarProperties.SELECT_ALL_ON_FOCUS;
 import static org.chromium.chrome.browser.omnibox.UrlBarProperties.TEXT_COLOR;
 
@@ -23,10 +24,12 @@ import androidx.test.filters.SmallTest;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.Robolectric;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
@@ -47,6 +50,7 @@ import org.chromium.ui.modelutil.PropertyModelChangeProcessor;
         manifest = Config.NONE,
         shadows = {ShadowOmniboxResourceProvider.class})
 public class UrlBarViewBinderUnitTest {
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
     @Mock Callback<Boolean> mFocusChangeCallback;
 
     private Activity mActivity;
@@ -71,7 +75,6 @@ public class UrlBarViewBinderUnitTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mActivity = Robolectric.buildActivity(Activity.class).setup().get();
 
         mModel = new PropertyModel(UrlBarProperties.ALL_KEYS);
@@ -190,5 +193,13 @@ public class UrlBarViewBinderUnitTest {
         mModel.set(HINT_TEXT, R.string.hub_search_empty_hint_incognito);
         Assert.assertEquals(
                 mActivity.getString(R.string.hub_search_empty_hint_incognito), mUrlBar.getHint());
+    }
+
+    @Test
+    @SmallTest
+    public void testSetIsInCct() {
+        Assert.assertFalse(mUrlBar.getIsInCctForTesting());
+        mModel.set(IS_IN_CCT, true);
+        Assert.assertTrue(mUrlBar.getIsInCctForTesting());
     }
 }

@@ -37,7 +37,6 @@ import org.chromium.base.supplier.OneshotSupplierImpl;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeBaseAppCompatActivity;
 import org.chromium.chrome.browser.back_press.BackPressHelper;
-import org.chromium.chrome.browser.back_press.SecondaryActivityBackPressUma.SecondaryActivity;
 import org.chromium.chrome.browser.feedback.HelpAndFeedbackLauncherImpl;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.init.ChromeBrowserInitializer;
@@ -54,7 +53,7 @@ import org.chromium.components.browser_ui.modaldialog.AppModalPresenter;
 import org.chromium.components.browser_ui.settings.EmbeddableSettingsPage;
 import org.chromium.components.browser_ui.util.TraceEventVectorDrawableCompat;
 import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
-import org.chromium.components.browser_ui.widget.scrim.ScrimCoordinator;
+import org.chromium.components.browser_ui.widget.scrim.ScrimManager;
 import org.chromium.ui.KeyboardVisibilityDelegate;
 import org.chromium.ui.UiUtils;
 import org.chromium.ui.base.DeviceFormFactor;
@@ -101,7 +100,7 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
 
     private boolean mStandalone;
     private Profile mProfile;
-    private ScrimCoordinator mScrim;
+    private ScrimManager mScrimManager;
     private ManagedBottomSheetController mManagedBottomSheetController;
     private final OneshotSupplierImpl<BottomSheetController> mBottomSheetControllerSupplier =
             new OneshotSupplierImpl<>();
@@ -190,8 +189,7 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
         setStatusBarColor();
         initBottomSheet();
 
-        mSnackbarManagerSupplier.set(
-                new SnackbarManager(this, findViewById(android.R.id.content), null));
+        mSnackbarManagerSupplier.set(new SnackbarManager(this, getContentView(), null));
 
         mIntentRequestTracker = IntentRequestTracker.createFromActivity(this);
     }
@@ -235,28 +233,12 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
     /** Set up the bottom sheet for this activity. */
     private void initBottomSheet() {
         ViewGroup sheetContainer = findViewById(R.id.sheet_container);
-        mScrim =
-                new ScrimCoordinator(
-                        this,
-                        new ScrimCoordinator.SystemUiScrimDelegate() {
-                            @Override
-                            public void setStatusBarScrimFraction(float scrimFraction) {
-                                // TODO: Implement if status bar needs to change color with the
-                                // scrim.
-                            }
-
-                            @Override
-                            public void setNavigationBarScrimFraction(float scrimFraction) {
-                                // TODO: Implement if navigation bar needs to change color with the
-                                // scrim.
-                            }
-                        },
-                        (ViewGroup) sheetContainer.getParent(),
-                        getColor(R.color.default_scrim_color));
+        // TODO: Observe scrim changes if status bar needs to change color with the scrim.
+        mScrimManager = new ScrimManager(this, (ViewGroup) sheetContainer.getParent());
 
         mManagedBottomSheetController =
                 BottomSheetControllerFactory.createBottomSheetController(
-                        () -> mScrim,
+                        () -> mScrimManager,
                         CallbackUtils.emptyCallback(),
                         getWindow(),
                         KeyboardVisibilityDelegate.getInstance(),
@@ -359,7 +341,7 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
 
     @Override
     protected void onDestroy() {
-        mScrim.destroy();
+        mScrimManager.destroy();
         super.onDestroy();
     }
 
@@ -446,8 +428,7 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
             BackPressHelper.create(
                     activeFragment.getViewLifecycleOwner(),
                     getOnBackPressedDispatcher(),
-                    (BackPressHandler) activeFragment,
-                    SecondaryActivity.SETTINGS);
+                    (BackPressHandler) activeFragment);
         }
     }
 
@@ -455,8 +436,7 @@ public class SettingsActivity extends ChromeBaseAppCompatActivity
         BackPressHelper.create(
                 this,
                 getOnBackPressedDispatcher(),
-                mBottomSheetControllerSupplier.get().getBottomSheetBackPressHandler(),
-                SecondaryActivity.SETTINGS);
+                mBottomSheetControllerSupplier.get().getBottomSheetBackPressHandler());
     }
 
     @Override

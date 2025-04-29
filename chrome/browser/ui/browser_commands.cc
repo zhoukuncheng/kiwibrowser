@@ -5,6 +5,7 @@
 #include "chrome/browser/ui/browser_commands.h"
 
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -21,7 +22,6 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/apps/app_service/app_launch_params.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
@@ -57,7 +57,6 @@
 #include "chrome/browser/ui/autofill/address_bubbles_controller.h"
 #include "chrome/browser/ui/autofill/payments/filled_card_information_bubble_controller_impl.h"
 #include "chrome/browser/ui/autofill/payments/iban_bubble_controller_impl.h"
-#include "chrome/browser/ui/autofill/payments/manage_migration_ui_controller.h"
 #include "chrome/browser/ui/autofill/payments/mandatory_reauth_bubble_controller_impl.h"
 #include "chrome/browser/ui/autofill/payments/offer_notification_bubble_controller_impl.h"
 #include "chrome/browser/ui/autofill/payments/save_card_bubble_controller_impl.h"
@@ -94,8 +93,6 @@
 #include "chrome/browser/ui/tabs/organization/tab_organization_service.h"
 #include "chrome/browser/ui/tabs/organization/tab_organization_service_factory.h"
 #include "chrome/browser/ui/tabs/organization/tab_organization_session.h"
-#include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_keyed_service.h"
-#include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_service_factory.h"
 #include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_utils.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_group.h"
@@ -117,6 +114,7 @@
 #include "chrome/common/content_restriction.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
+#include "chrome/grit/generated_resources.h"
 #include "components/bookmarks/browser/bookmark_model.h"
 #include "components/bookmarks/browser/bookmark_node.h"
 #include "components/bookmarks/browser/bookmark_utils.h"
@@ -136,6 +134,7 @@
 #include "components/find_in_page/find_tab_helper.h"
 #include "components/find_in_page/find_types.h"
 #include "components/google/core/common/google_util.h"
+#include "components/language_detection/core/constants.h"
 #include "components/lens/buildflags.h"
 #include "components/lens/lens_features.h"
 #include "components/lens/lens_overlay_invocation_source.h"
@@ -155,7 +154,6 @@
 #include "components/tab_groups/tab_group_visual_data.h"
 #include "components/translate/core/browser/language_state.h"
 #include "components/translate/core/browser/translate_manager.h"
-#include "components/translate/core/common/translate_constants.h"
 #include "components/user_education/common/feature_promo/feature_promo_controller.h"
 #include "components/web_modal/web_contents_modal_dialog_manager.h"
 #include "components/webapps/common/web_app_id.h"
@@ -173,7 +171,6 @@
 #include "content/public/common/content_switches.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/common/url_utils.h"
-#include "content/public/common/user_agent.h"
 #include "extensions/buildflags/buildflags.h"
 #include "pdf/buildflags.h"
 #include "printing/buildflags/buildflags.h"
@@ -216,11 +213,6 @@
 
 #if BUILDFLAG(ENABLE_RLZ)
 #include "components/rlz/rlz_tracker.h"  // nogncheck
-#endif
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chromeos/crosapi/mojom/task_manager.mojom.h"
-#include "chromeos/lacros/lacros_service.h"
 #endif
 
 #if BUILDFLAG(IS_CHROMEOS)
@@ -1085,19 +1077,6 @@ void MoveActiveTabToNewWindow(Browser* browser) {
                       std::vector<int>(selection.begin(), selection.end()));
 }
 
-void ToggleCompactMode(Browser* browser) {
-  const bool current_pref =
-      browser->profile()->GetPrefs()->GetBoolean(prefs::kCompactModeEnabled);
-  browser->profile()->GetPrefs()->SetBoolean(prefs::kCompactModeEnabled,
-                                             !current_pref);
-}
-
-bool ShouldUseCompactMode(Profile* profile) {
-  CHECK(profile);
-  return base::FeatureList::IsEnabled(features::kCompactMode) &&
-         profile->GetPrefs()->GetBoolean(prefs::kCompactModeEnabled);
-}
-
 bool CanMoveTabsToNewWindow(Browser* browser,
                             const std::vector<int>& tab_indices) {
   if (browser->is_type_app()) {
@@ -1111,9 +1090,28 @@ bool CanMoveTabsToNewWindow(Browser* browser,
          static_cast<int>(tab_indices.size());
 }
 
+void MoveGroupToNewWindow(Browser* browser, tab_groups::TabGroupId group) {
+  Browser* new_browser;
+  if (browser->is_type_app() && browser->app_controller()->has_tab_strip()) {
+    new_browser = Browser::Create(Browser::CreateParams::CreateForApp(
+        browser->app_name(), browser->is_trusted_source(), gfx::Rect(),
+        browser->profile(), true));
+    web_app::MaybeAddPinnedHomeTab(new_browser,
+                                   new_browser->app_controller()->app_id());
+  } else {
+    new_browser =
+        Browser::Create(Browser::CreateParams(browser->profile(), true));
+  }
+
+  std::unique_ptr<DetachedTabGroup> detached_group =
+      browser->tab_strip_model()->DetachTabGroupForInsertion(group);
+  new_browser->tab_strip_model()->InsertDetachedTabGroupAt(
+      std::move(detached_group), 0);
+  new_browser->window()->Show();
+}
+
 void MoveTabsToNewWindow(Browser* browser,
-                         const std::vector<int>& tab_indices,
-                         std::optional<tab_groups::TabGroupId> group) {
+                         const std::vector<int>& tab_indices) {
   if (tab_indices.empty()) {
     return;
   }
@@ -1128,27 +1126,6 @@ void MoveTabsToNewWindow(Browser* browser,
   } else {
     new_browser =
         Browser::Create(Browser::CreateParams(browser->profile(), true));
-  }
-
-  tab_groups::TabGroupSyncService* tab_group_service =
-      tab_groups::SavedTabGroupUtils::GetServiceForProfile(browser->profile());
-  std::unique_ptr<tab_groups::ScopedLocalObservationPauser> observation_pauser;
-
-  tab_groups::TabGroupVisualData visual_data;
-
-  if (group.has_value()) {
-    const tab_groups::TabGroupVisualData* old_visual_data =
-        browser->tab_strip_model()
-            ->group_model()
-            ->GetTabGroup(group.value())
-            ->visual_data();
-
-    visual_data = tab_groups::TabGroupVisualData(old_visual_data->title(),
-                                                 old_visual_data->color(),
-                                                 false /* is_collapsed */);
-    if (tab_group_service && tab_group_service->GetGroup(group.value())) {
-      observation_pauser = tab_group_service->CreateScopedLocalObserverPauser();
-    }
   }
 
   int indices_size = tab_indices.size();
@@ -1168,21 +1145,8 @@ void MoveTabsToNewWindow(Browser* browser,
       add_types = add_types | AddTabTypes::ADD_ACTIVE;
     }
 
-    new_browser->tab_strip_model()->AddTab(std::move(tab_model), -1,
-                                           ui::PAGE_TRANSITION_TYPED, add_types,
-                                           std::nullopt);
-  }
-
-  // Add all the tabs in the new browser to the group if it belonged in a group.
-  if (group.has_value()) {
-    std::vector<int> indices(new_browser->tab_strip_model()->GetTabCount());
-    std::iota(indices.begin(), indices.end(), 0);
-    new_browser->tab_strip_model()->AddToNewGroup(indices, group.value(),
-                                                  visual_data);
-
-    if (observation_pauser) {
-      observation_pauser.reset();
-    }
+    new_browser->tab_strip_model()->AddTab(
+        std::move(tab_model), -1, ui::PAGE_TRANSITION_TYPED, add_types);
   }
 
   new_browser->window()->Show();
@@ -1276,7 +1240,7 @@ void CreateNewTabGroup(Browser* browser) {
   NewTab(browser);
   browser->tab_strip_model()->ExecuteContextMenuCommand(
       browser->tab_strip_model()->active_index(),
-      TabStripModel::ContextMenuCommand::CommandAddToNewGroup);
+      TabStripModel::ContextMenuCommand::CommandAddToNewGroupFromMenuItem);
 }
 
 void MuteSite(Browser* browser) {
@@ -1450,45 +1414,55 @@ bool CanMoveActiveTabToReadLater(Browser* browser) {
                                        &title);
 }
 
-bool MoveCurrentTabToReadLater(Browser* browser) {
-  return MoveTabToReadLater(browser,
-                            browser->tab_strip_model()->GetActiveWebContents());
+void MoveCurrentTabToReadLater(Browser* browser) {
+  MoveTabsToReadLater(browser,
+                      {browser->tab_strip_model()->GetActiveWebContents()});
 }
 
-bool MoveTabToReadLater(Browser* browser, content::WebContents* web_contents) {
-  GURL url;
-  std::u16string title;
-  ReadingListModel* model = GetReadingListModel(browser);
-  if (!CanMoveWebContentsToReadLater(browser, web_contents, model, &url,
-                                     &title)) {
-    return false;
+void MoveTabsToReadLater(Browser* browser,
+                         std::vector<content::WebContents*> web_contentses) {
+  int added_to_read_later = 0;
+  for (WebContents* const web_contents : web_contentses) {
+    GURL url;
+    std::u16string title;
+    ReadingListModel* model = GetReadingListModel(browser);
+    if (!CanMoveWebContentsToReadLater(browser, web_contents, model, &url,
+                                       &title)) {
+      continue;
+    }
+    model->AddOrReplaceEntry(url, base::UTF16ToUTF8(title),
+                             reading_list::EntrySource::ADDED_VIA_CURRENT_APP,
+                             /*estimated_read_time=*/base::TimeDelta());
+    browser->window()->MaybeShowFeaturePromo(
+        feature_engagement::kIPHReadingListDiscoveryFeature);
+    base::UmaHistogramEnumeration(
+        "ReadingList.BookmarkBarState.OnEveryAddToReadingList",
+        browser->bookmark_bar_state());
+    added_to_read_later += 1;
   }
-  model->AddOrReplaceEntry(url, base::UTF16ToUTF8(title),
-                           reading_list::EntrySource::ADDED_VIA_CURRENT_APP,
-                           /*estimated_read_time=*/base::TimeDelta());
-  browser->window()->MaybeShowFeaturePromo(
-      feature_engagement::kIPHReadingListDiscoveryFeature);
-  base::UmaHistogramEnumeration(
-      "ReadingList.BookmarkBarState.OnEveryAddToReadingList",
-      browser->bookmark_bar_state());
+
+  if (added_to_read_later == 0) {
+    return;
+  }
+
 #if !BUILDFLAG(IS_ANDROID)
   if (toast_features::IsEnabled(toast_features::kReadingListToast)) {
     // Don't show the reading list toast if the side panel is visible.
     std::optional<SidePanelEntry::Id> id =
         browser->GetFeatures().side_panel_ui()->GetCurrentEntryId();
     if (id.has_value() && id.value() == SidePanelEntryId::kReadingList) {
-      return true;
+      return;
     }
 
     ToastController* const toast_controller =
         browser->GetFeatures().toast_controller();
     if (toast_controller) {
-      toast_controller->MaybeShowToast(
-          ToastParams(ToastId::kAddedToReadingList));
+      ToastParams params = ToastParams(ToastId::kAddedToReadingList);
+      params.body_string_cardinality_param = added_to_read_later;
+      toast_controller->MaybeShowToast(std::move(params));
     }
   }
 #endif
-  return true;
 }
 
 bool MarkCurrentTabAsReadInReadLater(Browser* browser) {
@@ -1554,15 +1528,6 @@ void ShowMandatoryReauthOptInPrompt(Browser* browser) {
       autofill::MandatoryReauthBubbleControllerImpl::FromWebContents(
           web_contents);
   controller->ReshowBubble();
-}
-
-void MigrateLocalCards(Browser* browser) {
-  WebContents* web_contents =
-      browser->tab_strip_model()->GetActiveWebContents();
-  autofill::ManageMigrationUiController* controller =
-      autofill::ManageMigrationUiController::FromWebContents(web_contents);
-  // Show migration-related Ui when the user clicks the credit card icon.
-  controller->OnUserClickedCreditCardIcon();
 }
 
 void SaveAutofillAddress(Browser* browser) {
@@ -1631,7 +1596,7 @@ void ShowTranslateBubble(Browser* browser) {
   // If the source language matches the target language, we change the source
   // language to unknown, so that we display "Detected Language".
   if (source_language == target_language) {
-    source_language = translate::kUnknownLanguageCode;
+    source_language = language_detection::kUnknownLanguageCode;
   }
 
   translate::TranslateStep step = translate::TRANSLATE_STEP_BEFORE_TRANSLATE;
@@ -1761,9 +1726,7 @@ void Print(Browser* browser) {
   if (base::FeatureList::IsEnabled(::features::kPrintPreviewCrosPrimary)) {
     chromeos::printing::StartPrint(
         web_contents,
-#if BUILDFLAG(IS_CHROMEOS_ASH)
         /*print_renderer=*/mojo::NullAssociatedRemote(),
-#endif
         browser->profile()->GetPrefs()->GetBoolean(
             prefs::kPrintPreviewDisabled),
         /*has_selection=*/false);
@@ -1773,12 +1736,12 @@ void Print(Browser* browser) {
 
   printing::StartPrint(
       web_contents,
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
       /*print_renderer=*/mojo::NullAssociatedRemote(),
 #endif
       browser->profile()->GetPrefs()->GetBoolean(prefs::kPrintPreviewDisabled),
       /*has_selection=*/false);
-#endif
+#endif  // BUILDFLAG(ENABLE_PRINTING)
 }
 
 bool CanPrint(Browser* browser) {
@@ -1959,25 +1922,10 @@ bool CanOpenTaskManager() {
 #endif
 }
 
-void OpenTaskManager(Browser* browser) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  // Open linux version of task manager UI if ash TaskManager
-  // interface is in an old version.
-  if (chromeos::LacrosService::Get()
-          ->GetInterfaceVersion<crosapi::mojom::TaskManager>() < 1) {
-    base::RecordAction(UserMetricsAction("TaskManager"));
-    chrome::ShowTaskManager(browser);
-    return;
-  }
-  // Invoke task manager UI in ash, which will call chrome::OpenTaskManager()
-  // in ash to run through the code path in the next section
-  // (!BUILDFLAG(IS_ANDROID)).
-  chromeos::LacrosService::Get()
-      ->GetRemote<crosapi::mojom::TaskManager>()
-      ->ShowTaskManager();
-#elif !BUILDFLAG(IS_ANDROID)
+void OpenTaskManager(Browser* browser, task_manager::StartAction start_action) {
+#if !BUILDFLAG(IS_ANDROID)
   base::RecordAction(UserMetricsAction("TaskManager"));
-  chrome::ShowTaskManager(browser);
+  chrome::ShowTaskManager(browser, start_action);
 #else
   NOTREACHED();
 #endif
@@ -2086,8 +2034,9 @@ void SetAndroidOsForTabletSite(content::WebContents* current_tab) {
     entry->SetIsOverridingUserAgent(true);
     std::string product = embedder_support::GetProductAndVersion() + " Mobile";
     blink::UserAgentOverride ua_override;
-    ua_override.ua_string_override = content::BuildUserAgentFromOSAndProduct(
-        kOsOverrideForTabletSite, product);
+    ua_override.ua_string_override =
+        embedder_support::BuildUserAgentFromOSAndProduct(
+            kOsOverrideForTabletSite, product);
     ua_override.ua_metadata_override = embedder_support::GetUserAgentMetadata(
         g_browser_process->local_state());
     ua_override.ua_metadata_override->mobile = true;
@@ -2099,11 +2048,11 @@ void SetAndroidOsForTabletSite(content::WebContents* current_tab) {
   }
 }
 
-void ToggleFullscreenMode(Browser* browser) {
+void ToggleFullscreenMode(Browser* browser, bool user_initiated) {
   DCHECK(browser);
   browser->exclusive_access_manager()
       ->fullscreen_controller()
-      ->ToggleBrowserFullscreenMode();
+      ->ToggleBrowserFullscreenMode(user_initiated);
 }
 
 void ClearCache(Browser* browser) {
@@ -2143,7 +2092,7 @@ bool CanCopyUrl(const Browser* browser) {
 
 bool IsWebAppOrCustomTab(const Browser* browser) {
   return
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
       browser->is_type_custom_tab() ||
 #endif
       web_app::AppBrowserController::IsWebApp(browser);
@@ -2312,8 +2261,7 @@ void ExecLensRegionSearch(Browser* browser) {
     lens_region_search_controller_data->lens_region_search_controller =
         std::make_unique<lens::LensRegionSearchController>();
     lens_region_search_controller_data->lens_region_search_controller->Start(
-        contents, lens::features::IsLensFullscreenSearchEnabled(),
-        /*force_open_in_new_tab=*/false, is_google_dsp, entry_point);
+        contents, /*use_fullscreen_capture=*/false, is_google_dsp, entry_point);
     browser->SetUserData(lens::LensRegionSearchControllerData::kDataKey,
                          std::move(lens_region_search_controller_data));
   }
@@ -2323,11 +2271,6 @@ void ExecLensRegionSearch(Browser* browser) {
 void OpenCommerceProductSpecificationsTab(Browser* browser,
                                           const std::vector<GURL>& urls,
                                           const int position) {
-  if (static_cast<int>(urls.size()) <
-      commerce::kProductSpecificationsMinTabsCount) {
-    return;
-  }
-
   auto* prefs = browser->profile()->GetPrefs();
   // If user has not accepted the latest disclosure, show the disclosure dialog
   // first.

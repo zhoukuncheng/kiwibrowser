@@ -8,12 +8,15 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import androidx.annotation.VisibleForTesting;
-import androidx.collection.ArrayMap;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.Token;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.components.tab_groups.TabGroupColorId;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -80,10 +83,13 @@ public class TabGroupColorUtils {
         }
 
         Map<Integer, Integer> currentColorCountMap = getCurrentColorCountMap(tabGroupModelFilter);
-        Set<Integer> rootIds = tabGroupModelFilter.getAllTabGroupRootIds();
+        Set<Token> tabGroupIds = tabGroupModelFilter.getAllTabGroupIds();
 
         // Assign a color to all tab groups that don't have a color.
-        for (Integer rootId : rootIds) {
+        for (Token tabGroupId : tabGroupIds) {
+            int rootId = tabGroupModelFilter.getRootIdFromTabGroupId(tabGroupId);
+            assert rootId != Tab.INVALID_TAB_ID;
+
             int colorId = getTabGroupColor(rootId);
 
             // Retrieve the next suggested colorId if the current tab group does not have a color.
@@ -123,6 +129,21 @@ public class TabGroupColorUtils {
         ContextUtils.getApplicationContext().deleteSharedPreferences(TAB_GROUP_COLORS_FILE_NAME);
     }
 
+    /**
+     * This method returns the color id list attributed to tab groups specifically.
+     *
+     * @return An array list of ids from 0 to n representing all colors in the palette
+     */
+    public static List<Integer> getTabGroupColorIdList() {
+        // The color ids used here can be found in {@link TabGroupColorId}. Note that it is assumed
+        // the id list is contiguous from 0 to size-1.
+        List<Integer> colors = new ArrayList<>(TabGroupColorId.NUM_ENTRIES);
+        for (int i = 0; i < TabGroupColorId.NUM_ENTRIES; i++) {
+            colors.add(i);
+        }
+        return colors;
+    }
+
     private static SharedPreferences getSharedPreferences() {
         return ContextUtils.getApplicationContext()
                 .getSharedPreferences(TAB_GROUP_COLORS_FILE_NAME, Context.MODE_PRIVATE);
@@ -131,16 +152,19 @@ public class TabGroupColorUtils {
     /** Get a map that indicates the current usage count of each tab group color. */
     private static Map<Integer, Integer> getCurrentColorCountMap(
             TabGroupModelFilter tabGroupModelFilter) {
-        int colorListSize = TabGroupColorId.NUM_ENTRIES;
-        Map<Integer, Integer> colorCountMap = new ArrayMap<>(colorListSize);
-        for (int i = 0; i < colorListSize; i++) {
-            colorCountMap.put(i, 0);
+        List<Integer> colorList = getTabGroupColorIdList();
+        Map<Integer, Integer> colorCountMap = new LinkedHashMap<>(colorList.size());
+        for (Integer colorId : colorList) {
+            colorCountMap.put(colorId, 0);
         }
 
-        Set<Integer> rootIds = tabGroupModelFilter.getAllTabGroupRootIds();
+        Set<Token> tabGroupIds = tabGroupModelFilter.getAllTabGroupIds();
 
         // Filter all tab groups for ones that already have a color assigned.
-        for (Integer rootId : rootIds) {
+        for (Token tabGroupId : tabGroupIds) {
+            int rootId = tabGroupModelFilter.getRootIdFromTabGroupId(tabGroupId);
+            assert rootId != Tab.INVALID_TAB_ID;
+
             int colorId = getTabGroupColor(rootId);
 
             // If the tab group has a color stored on shared prefs, increment the colorId map count.
@@ -161,10 +185,6 @@ public class TabGroupColorUtils {
             if (entry.getValue() < colorCount) {
                 colorCount = entry.getValue();
                 colorId = entry.getKey();
-            } else if (entry.getValue() == colorCount) {
-                if (entry.getKey() < colorId) {
-                    colorId = entry.getKey();
-                }
             }
         }
 

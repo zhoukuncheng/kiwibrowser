@@ -22,6 +22,7 @@ import androidx.annotation.ColorRes;
 import androidx.annotation.IntDef;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.StringRes;
 import androidx.annotation.VisibleForTesting;
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.core.graphics.drawable.DrawableCompat;
@@ -32,12 +33,14 @@ import org.chromium.base.BuildInfo;
 import org.chromium.base.CallbackController;
 import org.chromium.base.ResettersForTesting;
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.base.metrics.RecordUserAction;
 import org.chromium.base.supplier.ObservableSupplier;
 import org.chromium.base.supplier.OneshotSupplier;
 import org.chromium.base.supplier.Supplier;
 import org.chromium.build.BuildConfig;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ActivityTabProvider;
+import org.chromium.chrome.browser.ai.AiAssistantService;
 import org.chromium.chrome.browser.bookmarks.BookmarkModel;
 import org.chromium.chrome.browser.bookmarks.PowerBookmarkUtils;
 import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
@@ -53,14 +56,15 @@ import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcher;
 import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
 import org.chromium.chrome.browser.night_mode.WebContentsDarkModeController;
 import org.chromium.chrome.browser.omaha.UpdateMenuItemHelper;
+import org.chromium.chrome.browser.pdf.PdfPage;
 import org.chromium.chrome.browser.preferences.Pref;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.quick_delete.QuickDeleteController;
 import org.chromium.chrome.browser.readaloud.ReadAloudController;
 import org.chromium.chrome.browser.share.ShareHelper;
 import org.chromium.chrome.browser.share.ShareUtils;
 import org.chromium.chrome.browser.sync.settings.SyncSettingsUtils;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tabmodel.TabGroupModelFilter;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.tinker_tank.TinkerTankDelegate;
 import org.chromium.chrome.browser.toolbar.ToolbarManager;
@@ -122,7 +126,6 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
     private CallbackController mCallbackController = new CallbackController();
     private ObservableSupplier<BookmarkModel> mBookmarkModelSupplier;
     private boolean mUpdateMenuItemVisible;
-    private ShareUtils mShareUtils;
     private final Supplier<ReadAloudController> mReadAloudControllerSupplier;
     private @Nullable ModelList mModelList;
     private int mReadAloudPos;
@@ -233,7 +236,6 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
         }
 
         mBookmarkModelSupplier = bookmarkModelSupplier;
-        mShareUtils = new ShareUtils();
     }
 
     @Override
@@ -411,6 +413,11 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
             }
             modelList.add(new MVCListAdapter.ListItem(menutype, propertyModel));
         }
+        int lastIndex = modelList.size() - 1;
+        int itemId = modelList.get(lastIndex).model.get(AppMenuItemProperties.MENU_ITEM_ID);
+        if (DividerLineMenuItemViewBinder.isDividerLineItemId(itemId)) {
+            modelList.removeAt(lastIndex);
+        }
         mModelList = modelList;
         return modelList;
     }
@@ -499,9 +506,18 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 menu.findItem(R.id.disable_price_tracking_menu_id),
                 currentTab);
 
+        updateAiMenuItemRow(
+                menu.findItem(R.id.ai_web_menu_id), menu.findItem(R.id.ai_pdf_menu_id), currentTab);
+
+        boolean showOpenWith =
+                currentTab != null
+                        && currentTab.isNativePage()
+                        && currentTab.getNativePage().isPdf();
+        menu.findItem(R.id.open_with_id).setVisible(showOpenWith);
+
         // Don't allow either "chrome://" pages or interstitial pages to be shared, or when the
         // current tab is null.
-        boolean showShare = isCurrentTabNotNull && mShareUtils.shouldEnableShare(currentTab);
+        boolean showShare = isCurrentTabNotNull && ShareUtils.shouldEnableShare(currentTab);
         menu.findItem(R.id.share_row_menu_id).setVisible(showShare);
 
         if (isCurrentTabNotNull) {
@@ -519,6 +535,10 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 .setVisible(
                         isCurrentTabNotNull
                                 && shouldShowPaintPreview(isNativePage, currentTab, isIncognito));
+
+        menu.findItem(R.id.add_to_group_menu_id)
+                .setVisible(ChromeFeatureList.sTabGroupParityBottomSheetAndroid.isEnabled())
+                .setTitle(getAddToGroupMenuItemString());
 
         // Enable image descriptions if touch exploration is currently enabled, but not on the
         // native NTP.
@@ -578,14 +598,18 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
 
         updateManagedByMenuItem(menu, currentTab);
 
-        // Only display quick delete divider line on the page menu and if quick delete is enabled.
-        menu.findItem(R.id.quick_delete_divider_line_id)
-                .setVisible(isQuickDeleteEnabled(isIncognito));
+        // Only display quick delete divider line on the regular mode page menu.
+        menu.findItem(R.id.quick_delete_divider_line_id).setVisible(!isIncognito);
+
+        menu.findItem(R.id.download_page_id).setVisible(shouldShowDownloadPageMenuItem(currentTab));
+
+        menu.findItem(R.id.ntp_customization_id)
+                .setVisible(ChromeFeatureList.sNewTabPageCustomization.isEnabled());
     }
 
     /**
-     * @return The number of Chrome instances either running alive or dormant but the state
-     *         is present for restoration.
+     * @return The number of Chrome instances either running alive or dormant but the state is
+     *     present for restoration.
      */
     @VisibleForTesting
     int getInstanceCount() {
@@ -609,11 +633,7 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 !isIncognitoReauthShowing
                         && isMenuSelectTabsVisible
                         && mTabModelSelector.isTabStateInitialized()
-                        && mTabModelSelector
-                                        .getTabGroupModelFilterProvider()
-                                        .getCurrentTabGroupModelFilter()
-                                        .getCount()
-                                != 0;
+                        && mTabModelSelector.getModel(isIncognito).getCount() != 0;
 
         boolean hasItemBetweenDividers = false;
 
@@ -672,9 +692,11 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 item.setVisible(isIncognito && isOverviewModeMenu);
                 item.setEnabled(hasIncognitoTabs);
             }
+            if (item.getItemId() == R.id.new_tab_group_menu_id) {
+                item.setVisible(ChromeFeatureList.sTabGroupEntryPointsAndroid.isEnabled());
+            }
             if (item.getItemId() == R.id.quick_delete_menu_id) {
-                item.setVisible(isQuickDeleteEnabled(isIncognito));
-                item.setEnabled(isQuickDeleteEnabled(isIncognito));
+                item.setVisible(!isIncognito);
             }
             if (item.getItemId() == R.id.tinker_tank_menu_id) {
                 boolean enabled = TinkerTankDelegate.isEnabled();
@@ -697,14 +719,6 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 hasItemBetweenDividers = true;
             }
         }
-    }
-
-    /**
-     * @param isIncognito Whether the currentTab is incognito.
-     * @return Whether the quick delete menu item should be enabled.
-     */
-    private boolean isQuickDeleteEnabled(boolean isIncognito) {
-        return !isIncognito && QuickDeleteController.isQuickDeleteEnabled();
     }
 
     /**
@@ -880,6 +894,16 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
      */
     protected boolean shouldShowManagedByMenuItem(Tab currentTab) {
         return false;
+    }
+
+    /**
+     * @param currentTab Current tab being displayed.
+     * Returns whether the "Download page" menu item should be displayed.
+     */
+    protected boolean shouldShowDownloadPageMenuItem(Tab currentTab) {
+        return ChromeFeatureList.sHideTabletToolbarDownloadButton.isEnabled()
+                && isTabletSizeScreen()
+                && shouldEnableDownloadPage(currentTab);
     }
 
     /** Sets the visibility and labels of the "Add to Home screen" and "Open WebAPK" menu items. */
@@ -1247,6 +1271,32 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
         }
     }
 
+    private void updateAiMenuItemRow(
+            @NonNull MenuItem aiWebMenuItem,
+            @NonNull MenuItem aiPdfMenuItem,
+            @Nullable Tab currentTab) {
+        if (currentTab == null
+                || currentTab.getWebContents() == null
+                || !ChromeFeatureList.isEnabled(
+                        ChromeFeatureList.ADAPTIVE_BUTTON_IN_TOP_TOOLBAR_PAGE_SUMMARY)
+                || !AiAssistantService.getInstance().canShowAiForTab(mContext, currentTab)) {
+            aiWebMenuItem.setVisible(false);
+            aiPdfMenuItem.setVisible(false);
+            return;
+        }
+
+        if (currentTab.isNativePage() && currentTab.getNativePage() instanceof PdfPage) {
+            aiWebMenuItem.setVisible(false);
+            aiPdfMenuItem.setVisible(true);
+        } else if (currentTab.getUrl() != null && UrlUtilities.isHttpOrHttps(currentTab.getUrl())) {
+            aiWebMenuItem.setVisible(true);
+            aiPdfMenuItem.setVisible(false);
+        } else {
+            aiWebMenuItem.setVisible(false);
+            aiPdfMenuItem.setVisible(false);
+        }
+    }
+
     /**
      * Updates the find in page menu item's state.
      *
@@ -1397,5 +1447,29 @@ public class AppMenuPropertiesDelegateImpl implements AppMenuPropertiesDelegate 
                 && !currentTab.isIncognito()) {
             BrowserUiUtils.recordModuleClickHistogram(ModuleTypeOnStartAndNtp.MENU_BUTTON);
         }
+        switch (getMenuGroup()) {
+            case MenuGroup.PAGE_MENU:
+                RecordUserAction.record("MobileMenuShow.PageMenu");
+                break;
+            case MenuGroup.OVERVIEW_MODE_MENU:
+                RecordUserAction.record("MobileMenuShow.OverviewModeMenu");
+                break;
+            case MenuGroup.TABLET_EMPTY_MODE_MENU:
+                RecordUserAction.record("MobileMenuShow.TabletEmptyModeMenu");
+                break;
+            case MenuGroup.INVALID: // fallthrough
+            default:
+                // Intentional noop.
+        }
+    }
+
+    public @StringRes int getAddToGroupMenuItemString() {
+        TabGroupModelFilter filter =
+                mTabModelSelector.getTabGroupModelFilterProvider().getCurrentTabGroupModelFilter();
+        if (filter != null) {
+            boolean hasGroups = filter.getTabGroupCount() != 0;
+            return hasGroups ? R.string.menu_add_to_group : R.string.menu_add_to_new_group;
+        }
+        return R.string.menu_add_to_group;
     }
 }

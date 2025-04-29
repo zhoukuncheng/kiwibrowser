@@ -100,6 +100,7 @@ class RangeUpdateScope {
       range_->RemoveFromSelectionIfInDifferentRoot(*old_document_);
       range_->UpdateSelectionIfAddedToSelection();
     }
+    range_->ResetUpdateSelectionBehavior();
 
     range_->ScheduleVisualUpdateIfInRegisteredHighlight(
         range_->OwnerDocument());
@@ -219,6 +220,11 @@ void Range::setStart(Node* ref_node,
     return;
 
   start_.Set(*ref_node, offset, child_node);
+  // Since we're setting start here, it's now ok to update selection start.
+  update_selection_behavior_ =
+      update_selection_behavior_ == UpdateSelectionBehavior::kEndOnly
+          ? UpdateSelectionBehavior::kAll
+          : UpdateSelectionBehavior::kStartOnly;
 
   CollapseIfNeeded(did_move_document, /*collapse_to_start=*/true);
 }
@@ -245,6 +251,11 @@ void Range::setEnd(Node* ref_node,
     return;
 
   end_.Set(*ref_node, offset, child_node);
+  // Since we're setting end here, it's now ok to update selection end.
+  update_selection_behavior_ =
+      update_selection_behavior_ == UpdateSelectionBehavior::kStartOnly
+          ? UpdateSelectionBehavior::kAll
+          : UpdateSelectionBehavior::kEndOnly;
 
   CollapseIfNeeded(did_move_document, /*collapse_to_start=*/false);
 }
@@ -271,15 +282,18 @@ void Range::collapse(bool to_start) {
 }
 
 void Range::CollapseIfNeeded(bool did_move_document, bool collapse_to_start) {
-  RangeBoundaryPoint original_start(start_);
-  RangeBoundaryPoint original_end(end_);
-
-  bool different_tree_scopes =
-      HasDifferentRootContainer(&start_.Container(), &end_.Container());
-  // If document moved, we are in different tree scopes, or start boundary point
-  // is after end boundary point, we should collapse the range.
-  if (did_move_document || different_tree_scopes ||
-      compareBoundaryPoints(start_, end_, ASSERT_NO_EXCEPTION) > 0) {
+  // If the boundary points have different shadow-including roots or start is
+  // after end, collapse the range and the selection.
+  if (did_move_document ||
+      &start_.Container().ShadowIncludingRoot() !=
+          &end_.Container().ShadowIncludingRoot() ||
+      StartPosition() > EndPosition()) {
+    ResetUpdateSelectionBehavior();
+    collapse(collapse_to_start);
+  } else if (HasDifferentRootContainer(&start_.Container(),
+                                       &end_.Container())) {
+    // If the boundary points have the same shadow-including root, but different
+    // roots, collapse the range only.
     collapse(collapse_to_start);
   }
 }
@@ -1774,9 +1788,26 @@ void Range::UpdateSelectionIfAddedToSelection() {
   DCHECK(endContainer()->isConnected());
   DCHECK(endContainer()->GetDocument() == OwnerDocument());
   EventDispatchForbiddenScope no_events;
+
+  Position start_position = StartPosition();
+  Position end_position = EndPosition();
+  if (RuntimeEnabledFeatures::SelectionAcrossShadowDOMEnabled()) {
+    switch (update_selection_behavior_) {
+      case UpdateSelectionBehavior::kEndOnly:
+        start_position =
+            selection.GetSelectionInDOMTree().ComputeStartPosition();
+        break;
+      case UpdateSelectionBehavior::kStartOnly:
+        end_position = selection.GetSelectionInDOMTree().ComputeEndPosition();
+        break;
+      case UpdateSelectionBehavior::kAll:
+        break;
+    }
+  }
+
   selection.SetSelection(SelectionInDOMTree::Builder()
-                             .Collapse(StartPosition())
-                             .Extend(EndPosition())
+                             .Collapse(start_position)
+                             .Extend(end_position)
                              .Build(),
                          SetSelectionOptions::Builder()
                              .SetShouldCloseTyping(true)
@@ -1784,6 +1815,10 @@ void Range::UpdateSelectionIfAddedToSelection() {
                              .SetDoNotSetFocus(true)
                              .Build());
   selection.CacheRangeOfDocument(this);
+}
+
+void Range::ResetUpdateSelectionBehavior() {
+  update_selection_behavior_ = UpdateSelectionBehavior::kAll;
 }
 
 void Range::ScheduleVisualUpdateIfInRegisteredHighlight(Document& document) {

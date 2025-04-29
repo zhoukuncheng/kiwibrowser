@@ -50,8 +50,7 @@ ExtensionKeybindingRegistry::ExtensionKeybindingRegistry(
       this, ui::MediaKeysListener::Scope::kFocused);
 }
 
-ExtensionKeybindingRegistry::~ExtensionKeybindingRegistry() {
-}
+ExtensionKeybindingRegistry::~ExtensionKeybindingRegistry() = default;
 
 void ExtensionKeybindingRegistry::SetShortcutHandlingSuspended(bool suspended) {
   shortcut_handling_suspended_ = suspended;
@@ -79,7 +78,7 @@ void ExtensionKeybindingRegistry::RemoveExtensionKeybinding(
       // Let each platform-specific implementation get a chance to clean up.
       RemoveExtensionKeybindingImpl(old->first, command_name);
 
-      if (Command::IsMediaKey(old->first)) {
+      if (old->first.IsMediaKey()) {
         any_media_keys_removed = true;
         if (media_keys_listener_)
           media_keys_listener_->StopWatchingMediaKey(old->first.key_code());
@@ -183,7 +182,7 @@ void ExtensionKeybindingRegistry::CommandExecuted(
   auto event =
       std::make_unique<Event>(events::COMMANDS_ON_COMMAND, kOnCommandEventName,
                               std::move(args), browser_context_);
-  event->user_gesture = EventRouter::USER_GESTURE_ENABLED;
+  event->user_gesture = EventRouter::UserGestureState::kEnabled;
   EventRouter::Get(browser_context_)
       ->DispatchEventToExtension(extension_id, std::move(event));
 }
@@ -201,7 +200,7 @@ void ExtensionKeybindingRegistry::AddEventTarget(
       std::make_pair(extension_id, command_name));
   // Shortcuts except media keys have only one target in the list. See comment
   // about |event_targets_|.
-  if (!Command::IsMediaKey(accelerator)) {
+  if (!accelerator.IsMediaKey()) {
     DCHECK_EQ(1u, event_targets_[accelerator].size());
   } else {
     if (media_keys_listener_)
@@ -342,8 +341,9 @@ bool ExtensionKeybindingRegistry::ExecuteCommands(
 
 bool ExtensionKeybindingRegistry::IsListeningToAnyMediaKeys() const {
   for (const auto& accelerator_target : event_targets_) {
-    if (Command::IsMediaKey(accelerator_target.first))
+    if (accelerator_target.first.IsMediaKey()) {
       return true;
+    }
   }
   return false;
 }

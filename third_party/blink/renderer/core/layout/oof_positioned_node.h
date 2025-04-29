@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
-#pragma allow_unsafe_buffers
-#endif
-
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_OOF_POSITIONED_NODE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_OOF_POSITIONED_NODE_H_
 
@@ -157,6 +152,8 @@ struct CORE_EXPORT PhysicalOofPositionedNode {
 
   using HorizontalEdge = PhysicalStaticPosition::HorizontalEdge;
   using VerticalEdge = PhysicalStaticPosition::VerticalEdge;
+  using PhysicalAlignmentDirection =
+      PhysicalStaticPosition::PhysicalAlignmentDirection;
 
  public:
   Member<LayoutBox> box;
@@ -164,6 +161,7 @@ struct CORE_EXPORT PhysicalOofPositionedNode {
   PhysicalOffset static_position;
   unsigned static_position_horizontal_edge : 2;
   unsigned static_position_vertical_edge : 2;
+  unsigned static_position_align_self_direction : 1;
   // Whether or not this is an PhysicalOofNodeForFragmentation.
   unsigned is_for_fragmentation : 1;
   unsigned requires_content_before_breaking : 1;
@@ -180,6 +178,8 @@ struct CORE_EXPORT PhysicalOofPositionedNode {
         static_position(static_position.offset),
         static_position_horizontal_edge(static_position.horizontal_edge),
         static_position_vertical_edge(static_position.vertical_edge),
+        static_position_align_self_direction(
+            static_position.align_self_direction),
         is_for_fragmentation(false),
         requires_content_before_breaking(requires_content_before_breaking),
         is_hidden_for_paint(is_hidden_for_paint),
@@ -194,9 +194,14 @@ struct CORE_EXPORT PhysicalOofPositionedNode {
   VerticalEdge GetStaticPositionVerticalEdge() const {
     return static_cast<VerticalEdge>(static_position_vertical_edge);
   }
+  PhysicalAlignmentDirection GetStaticPositionAlignSelfDirection() const {
+    return static_cast<PhysicalAlignmentDirection>(
+        static_position_align_self_direction);
+  }
   PhysicalStaticPosition StaticPosition() const {
     return {static_position, GetStaticPositionHorizontalEdge(),
-            GetStaticPositionVerticalEdge()};
+            GetStaticPositionVerticalEdge(),
+            GetStaticPositionAlignSelfDirection()};
   }
 
   void Trace(Visitor* visitor) const;
@@ -383,7 +388,7 @@ struct FragmentedOofData final : PhysicalFragment::OofData {
     HeapVector<PhysicalOofNodeForFragmentation>& descendants =
         const_cast<HeapVector<PhysicalOofNodeForFragmentation>&>(
             oof_data->oof_positioned_fragmentainer_descendants);
-    return {descendants.data(), descendants.size()};
+    return descendants;
   }
 
   void Trace(Visitor* visitor) const override {

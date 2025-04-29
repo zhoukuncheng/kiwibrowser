@@ -37,17 +37,18 @@ class CORE_EXPORT ContainerQueryEvaluator final
   static Element* FindContainer(Element* starting_element,
                                 const ContainerSelector&,
                                 const TreeScope* selector_tree_scope);
-  static bool EvalAndAdd(Element* style_container_candidate,
+  // The starting element is an element in the (exclusive) ancestor chain
+  // of `element where we should begin our search for a suitable container.
+  static Element* DetermineStartingElement(Element& element,
+                                           PseudoId,
+                                           const ContainerSelector&,
+                                           Element* nearest_size_container);
+
+  static bool EvalAndAdd(Element* starting_element,
                          const StyleRecalcContext&,
                          const ContainerQuery&,
                          ContainerSelectorCache&,
                          MatchResult&);
-
-  // Get the parent container candidate for container queries. Either the flat
-  // tree parent or the shadow-including parent based on a runtime flag due to a
-  // spec change.
-  // To be removed when the CSSFlatTreeContainer flag is removed.
-  static Element* ParentContainerCandidateElement(Element& element);
 
   // Width/Height are used by container relative units (qi, qb, etc).
   //
@@ -61,11 +62,11 @@ class CORE_EXPORT ContainerQueryEvaluator final
   bool DependsOnStyle() const { return depends_on_style_; }
   bool DependsOnStuck() const { return depends_on_stuck_; }
   bool DependsOnSnapped() const { return depends_on_snapped_; }
-  bool DependsOnOverflowing() const { return depends_on_overflowing_; }
+  bool DependsOnScrollable() const { return depends_on_scrollable_; }
   bool DependsOnSize() const { return depends_on_size_; }
   bool MayDependOnWritingDirection() const {
     return DependsOnSize() || DependsOnStuck() || DependsOnSnapped() ||
-           DependsOnOverflowing();
+           DependsOnScrollable();
   }
 
   enum class Change : uint8_t {
@@ -81,6 +82,23 @@ class CORE_EXPORT ContainerQueryEvaluator final
     // descendant containers.
     kDescendantContainers,
   };
+
+  // Evaluate and add a dependent query to this evaluator. During calls to
+  // SizeContainerChanged/StyleChanged, all dependent queries are checked to see
+  // if the new size/axis or computed style information causes a change in the
+  // evaluation result.
+  bool EvalAndAdd(const ContainerQuery& query,
+                  Change change,
+                  MatchResult& match_result);
+
+  // The affected ComputedStyle is marked with various flags to aid
+  // invalidation, e.g. DependsOnSizeContainerQueries. We usually want to set
+  // these flags even when there is currently no container to carry out the
+  // actual evaluation of the query, since a container may appear later.
+  //
+  // The flags are transported on MatchResult, but ultimately end up on
+  // ComputedStyle.
+  static void SetDependencyFlags(const ContainerQuery& query, MatchResult&);
 
   // Update the size/axis information of the evaluator.
   //
@@ -145,9 +163,8 @@ class CORE_EXPORT ContainerQueryEvaluator final
   void UpdateContainerSnapped(ContainerSnappedFlags snapped);
 
   // Update the CSSContainerValues with the new overflowing state.
-  void UpdateContainerOverflowing(
-      ContainerOverflowingFlags overflowing_horizontal,
-      ContainerOverflowingFlags overflowing_vertical);
+  void UpdateContainerScrollable(ContainerScrollableFlags scrollable_horizontal,
+                                 ContainerScrollableFlags scrollable_vertical);
 
   // Re-evaluate the cached results and clear any results which are affected by
   // the ContainerStuckPhysical changes.
@@ -160,16 +177,16 @@ class CORE_EXPORT ContainerQueryEvaluator final
 
   // Re-evaluate the cached results and clear any results which are affected by
   // the snapped target changes.
-  Change OverflowContainerChanged(
-      ContainerOverflowingFlags overflowing_horizontal,
-      ContainerOverflowingFlags overflowing_vertical);
+  Change ScrollableContainerChanged(
+      ContainerScrollableFlags scrollable_horizontal,
+      ContainerScrollableFlags scrollable_vertical);
 
   enum ContainerType {
     kSizeContainer,
     kStyleContainer,
     kStickyContainer,
     kSnapContainer,
-    kOverflowContainer,
+    kScrollableContainer,
   };
   void ClearResults(Change change, ContainerType container_type);
 
@@ -205,14 +222,6 @@ class CORE_EXPORT ContainerQueryEvaluator final
 
   Result Eval(const ContainerQuery&) const;
 
-  // Evaluate and add a dependent query to this evaluator. During calls to
-  // SizeContainerChanged/StyleChanged, all dependent queries are checked to see
-  // if the new size/axis or computed style information causes a change in the
-  // evaluation result.
-  bool EvalAndAdd(const ContainerQuery& query,
-                  Change change,
-                  MatchResult& match_result);
-
   Member<MediaQueryEvaluator> media_query_evaluator_;
   PhysicalSize size_;
   PhysicalAxes contained_axes_;
@@ -222,10 +231,10 @@ class CORE_EXPORT ContainerQueryEvaluator final
       static_cast<ContainerSnappedFlags>(ContainerSnapped::kNone);
   ContainerSnappedFlags pending_snapped_ =
       static_cast<ContainerSnappedFlags>(ContainerSnapped::kNone);
-  ContainerOverflowingFlags overflowing_horizontal_ =
-      static_cast<ContainerOverflowingFlags>(ContainerOverflowing::kNone);
-  ContainerOverflowingFlags overflowing_vertical_ =
-      static_cast<ContainerOverflowingFlags>(ContainerOverflowing::kNone);
+  ContainerScrollableFlags scrollable_horizontal_ =
+      static_cast<ContainerScrollableFlags>(ContainerScrollable::kNone);
+  ContainerScrollableFlags scrollable_vertical_ =
+      static_cast<ContainerScrollableFlags>(ContainerScrollable::kNone);
   HeapHashMap<Member<const ContainerQuery>, Result> results_;
   Member<ScrollStateQuerySnapshot> scroll_state_snapshot_;
   // The MediaQueryExpValue::UnitFlags of all queries evaluated against this
@@ -235,7 +244,7 @@ class CORE_EXPORT ContainerQueryEvaluator final
   bool depends_on_style_ = false;
   bool depends_on_stuck_ = false;
   bool depends_on_snapped_ = false;
-  bool depends_on_overflowing_ = false;
+  bool depends_on_scrollable_ = false;
   bool depends_on_size_ = false;
 };
 

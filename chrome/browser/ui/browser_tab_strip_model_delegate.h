@@ -58,7 +58,8 @@ class BrowserTabStripModelDelegate : public TabStripModelDelegate {
       content::WebContents* contents) override;
   bool ShouldDisplayFavicon(content::WebContents* contents) const override;
   bool CanReload() const override;
-  void AddToReadLater(content::WebContents* web_contents) override;
+  void AddToReadLater(
+      std::vector<content::WebContents*> web_contentses) override;
   bool SupportsReadLater() override;
   bool IsForWebApp() override;
   void CopyURL(content::WebContents* web_contents) override;
@@ -68,7 +69,7 @@ class BrowserTabStripModelDelegate : public TabStripModelDelegate {
   BrowserWindowInterface* GetBrowserWindowInterface() override;
   void OnGroupsDestruction(const std::vector<tab_groups::TabGroupId>& group_ids,
                            base::OnceCallback<void()> close_callback,
-                           bool is_bulk_operation) override;
+                           bool delete_groups) override;
   void OnRemovingAllTabsFromGroups(
       const std::vector<tab_groups::TabGroupId>& group_ids,
       base::OnceCallback<void()> callback) override;

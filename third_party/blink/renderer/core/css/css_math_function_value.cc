@@ -9,6 +9,7 @@
 #include "third_party/blink/renderer/core/css/css_value_clamping_utils.h"
 #include "third_party/blink/renderer/platform/geometry/calculation_expression_node.h"
 #include "third_party/blink/renderer/platform/geometry/length.h"
+#include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/blink/renderer/platform/wtf/size_assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
@@ -118,12 +119,18 @@ int CSSMathFunctionValue::ComputeInteger(
 
 double CSSMathFunctionValue::ComputeNumber(
     const CSSLengthResolver& length_resolver) const {
-  // |CSSToLengthConversionData| only resolves relative length units, but not
-  // percentages.
-  DCHECK_EQ(kCalcNumber, expression_->Category());
-  DCHECK(!expression_->HasPercentage());
+  if (expression_->Category() == kCalcNumber) {
+    // |CSSToLengthConversionData| only resolves relative length units, but not
+    // percentages.
+    DCHECK(!expression_->HasPercentage());
+  } else {
+    DCHECK_EQ(expression_->Category(), kCalcPercent);
+  }
   double value =
       ClampToPermittedRange(expression_->ComputeNumber(length_resolver));
+  if (expression_->Category() == kCalcPercent) {
+    value /= 100.0;
+  }
   return std::isnan(value) ? 0.0 : value;
 }
 
@@ -134,14 +141,14 @@ double CSSMathFunctionValue::ComputePercentage(
   DCHECK_EQ(kCalcPercent, expression_->Category());
   double value =
       ClampToPermittedRange(expression_->ComputeNumber(length_resolver));
-  return std::isnan(value) ? 0.0 : value;
+  return CSSValueClampingUtils::ClampDouble(value);
 }
 
 double CSSMathFunctionValue::ComputeValueInCanonicalUnit(
     const CSSLengthResolver& length_resolver) const {
-  // Don't use it for mix of length and percentage, as it would compute 10px +
-  // 10% to 20.
-  DCHECK(!IsCalculatedPercentageWithLength());
+  // Don't use it for mix of length and percentage or similar,
+  // as it would compute 10px + 10% to 20.
+  DCHECK(IsResolvableBeforeLayout());
   std::optional<double> optional_value =
       expression_->ComputeValueInCanonicalUnit(length_resolver);
   DCHECK(optional_value.has_value());
@@ -205,46 +212,6 @@ double CSSMathFunctionValue::ClampToPermittedRange(double value) const {
   }
 }
 
-CSSPrimitiveValue::BoolStatus CSSMathFunctionValue::IsZero() const {
-  if (IsCalculatedPercentageWithLength()) {
-    return BoolStatus::kUnresolvable;
-  }
-  if (expression_->ResolvedUnitType() == UnitType::kUnknown) {
-    return BoolStatus::kUnresolvable;
-  }
-  return expression_->IsZero();
-}
-
-CSSPrimitiveValue::BoolStatus CSSMathFunctionValue::IsOne() const {
-  if (IsCalculatedPercentageWithLength()) {
-    return BoolStatus::kUnresolvable;
-  }
-  if (expression_->ResolvedUnitType() == UnitType::kUnknown) {
-    return BoolStatus::kUnresolvable;
-  }
-  return expression_->IsOne();
-}
-
-CSSPrimitiveValue::BoolStatus CSSMathFunctionValue::IsHundred() const {
-  if (IsCalculatedPercentageWithLength()) {
-    return BoolStatus::kUnresolvable;
-  }
-  if (expression_->ResolvedUnitType() == UnitType::kUnknown) {
-    return BoolStatus::kUnresolvable;
-  }
-  return expression_->IsHundred();
-}
-
-CSSPrimitiveValue::BoolStatus CSSMathFunctionValue::IsNegative() const {
-  if (IsCalculatedPercentageWithLength()) {
-    return BoolStatus::kUnresolvable;
-  }
-  if (expression_->ResolvedUnitType() == UnitType::kUnknown) {
-    return BoolStatus::kUnresolvable;
-  }
-  return expression_->IsNegative();
-}
-
 bool CSSMathFunctionValue::IsPx() const {
   // TODO(crbug.com/979895): This is the result of refactoring, which might be
   // an existing bug. Fix it if necessary.
@@ -253,6 +220,10 @@ bool CSSMathFunctionValue::IsPx() const {
 
 bool CSSMathFunctionValue::IsComputationallyIndependent() const {
   return expression_->IsComputationallyIndependent();
+}
+
+bool CSSMathFunctionValue::IsElementDependent() const {
+  return expression_->IsElementDependent();
 }
 
 scoped_refptr<const CalculationValue> CSSMathFunctionValue::ToCalcValue(

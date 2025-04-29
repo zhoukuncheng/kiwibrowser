@@ -12,11 +12,13 @@ import android.text.SpannableStringBuilder;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
@@ -37,6 +39,7 @@ import org.chromium.url.GURL;
         manifest = Config.NONE,
         shadows = {ShadowOmniboxResourceProvider.class})
 public class UrlBarMediatorUnitTest {
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
     @Mock Callback<String> mMockUrlTextListener;
     @Mock Callback<String> mAnotherUrlTextMockListener;
     @Mock Callback<Boolean> mFocusChangeCallback;
@@ -46,8 +49,6 @@ public class UrlBarMediatorUnitTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
-
         mModel = new PropertyModel(UrlBarProperties.ALL_KEYS);
         mMediator =
                 new UrlBarMediator(
@@ -325,6 +326,13 @@ public class UrlBarMediatorUnitTest {
         mMediator.setUrlBarHintText(R.string.hub_search_empty_hint_incognito);
         Assert.assertEquals(
                 R.string.hub_search_empty_hint_incognito, mModel.get(UrlBarProperties.HINT_TEXT));
+    }
+
+    @Test
+    public void setIsInCct() {
+        Assert.assertFalse(mModel.get(UrlBarProperties.IS_IN_CCT));
+        mMediator.setIsInCct(true);
+        Assert.assertTrue(mModel.get(UrlBarProperties.IS_IN_CCT));
     }
 
     private static SpannableStringBuilder spannable(String text) {

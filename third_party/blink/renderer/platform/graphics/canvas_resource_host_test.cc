@@ -12,7 +12,6 @@
 #include "components/viz/test/test_gles2_interface.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/renderer/platform/graphics/graphics_types.h"
 #include "third_party/blink/renderer/platform/graphics/test/fake_canvas_resource_host.h"
 #include "third_party/blink/renderer/platform/graphics/test/gpu_test_utils.h"
 #include "third_party/blink/renderer/platform/testing/task_environment.h"
@@ -45,8 +44,7 @@ TEST(CanvasResourceHostTest, ReleaseLostTransferableResource) {
   // This test passes by not crashing and not triggering assertions.
   viz::TransferableResource resource;
   viz::ReleaseCallback release_callback;
-  EXPECT_TRUE(
-      host->PrepareTransferableResource(nullptr, &resource, &release_callback));
+  EXPECT_TRUE(host->PrepareTransferableResource(&resource, &release_callback));
 
   bool lost_resource = true;
   std::move(release_callback).Run(gpu::SyncToken(), lost_resource);
@@ -68,8 +66,7 @@ TEST(CanvasResourceHostTest, ReleaseLostTransferableResourceWithLostContext) {
   viz::TransferableResource resource;
   viz::ReleaseCallback release_callback;
 
-  EXPECT_TRUE(
-      host->PrepareTransferableResource(nullptr, &resource, &release_callback));
+  EXPECT_TRUE(host->PrepareTransferableResource(&resource, &release_callback));
 
   bool lost_resource = true;
   context->TestContextGL()->set_context_lost(true);
@@ -97,13 +94,13 @@ TEST(CanvasResourceHostTest, ReleaseResourcesAfterHostDestroyed) {
   viz::ReleaseCallback release_callback;
 
   // Resources aren't released if the host still uses them.
-  host->PrepareTransferableResource(nullptr, &resource, &release_callback);
+  host->PrepareTransferableResource(&resource, &release_callback);
   EXPECT_EQ(context->TestContextGL()->NumTextures(), 1u);
   std::move(release_callback).Run(gpu::SyncToken(), /*is_lost=*/false);
   EXPECT_EQ(context->TestContextGL()->NumTextures(), 1u);
 
   // Tearing down the host does not destroy unreleased resources.
-  host->PrepareTransferableResource(nullptr, &resource, &release_callback);
+  host->PrepareTransferableResource(&resource, &release_callback);
   host.reset();
   EXPECT_EQ(context->TestContextGL()->NumTextures(), 1u);
   std::move(release_callback).Run(gpu::SyncToken(), /*is_lost=*/false);

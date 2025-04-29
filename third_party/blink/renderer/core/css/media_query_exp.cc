@@ -37,6 +37,7 @@
 #include "third_party/blink/renderer/core/css/parser/css_parser_context.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_impl.h"
 #include "third_party/blink/renderer/core/css/parser/css_variable_parser.h"
+#include "third_party/blink/renderer/core/css/parser/media_query_parser.h"
 #include "third_party/blink/renderer/core/css/properties/css_parsing_utils.h"
 #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
@@ -201,6 +202,7 @@ static inline bool FeatureWithValidIdent(const String& media_feature,
         case CSSValueID::kInline:
         case CSSValueID::kX:
         case CSSValueID::kY:
+        case CSSValueID::kBoth:
           return true;
         default:
           return false;
@@ -208,8 +210,8 @@ static inline bool FeatureWithValidIdent(const String& media_feature,
     }
   }
 
-  if (RuntimeEnabledFeatures::CSSOverflowContainerQueriesEnabled()) {
-    if (media_feature == media_feature_names::kOverflowingMediaFeature) {
+  if (RuntimeEnabledFeatures::CSSScrollableContainerQueriesEnabled()) {
+    if (media_feature == media_feature_names::kScrollableMediaFeature) {
       switch (ident) {
         case CSSValueID::kNone:
         case CSSValueID::kTop:
@@ -220,6 +222,10 @@ static inline bool FeatureWithValidIdent(const String& media_feature,
         case CSSValueID::kBlockEnd:
         case CSSValueID::kInlineStart:
         case CSSValueID::kInlineEnd:
+        case CSSValueID::kBlock:
+        case CSSValueID::kInline:
+        case CSSValueID::kX:
+        case CSSValueID::kY:
           return true;
         default:
           return false;
@@ -233,8 +239,7 @@ static inline bool FeatureWithValidIdent(const String& media_feature,
 static inline bool FeatureWithValidLength(const String& media_feature,
                                           const CSSPrimitiveValue* value) {
   if (!(value->IsLength() ||
-        (value->IsNumber() &&
-         value->IsZero() == CSSPrimitiveValue::BoolStatus::kTrue))) {
+        (value->IsNumber() && value->GetValueIfKnown() == 0.0))) {
     return false;
   }
 
@@ -263,8 +268,8 @@ static inline bool FeatureWithValidDensity(const String& media_feature,
   // NOTE: The allowed range of <resolution> values always excludes negative
   // values, in addition to any explicit ranges that might be specified.
   // https://drafts.csswg.org/css-values/#resolution
-  if (!value->IsResolution() ||
-      value->IsNegative() == CSSPrimitiveValue::BoolStatus::kTrue) {
+  if (!value->IsResolution() || (value->GetValueIfKnown().has_value() &&
+                                 *value->GetValueIfKnown() < 0.0)) {
     return false;
   }
 
@@ -324,8 +329,8 @@ static inline bool FeatureWithNumber(const String& media_feature,
 static inline bool FeatureWithZeroOrOne(const String& media_feature,
                                         const CSSPrimitiveValue* value) {
   if (!value->IsInteger() ||
-      (value->IsOne() == CSSPrimitiveValue::BoolStatus::kFalse &&
-       value->IsZero() == CSSPrimitiveValue::BoolStatus::kFalse)) {
+      (value->GetValueIfKnown().has_value() &&
+       *value->GetValueIfKnown() != 1.0 && *value->GetValueIfKnown() != 0.0)) {
     return false;
   }
 
@@ -420,10 +425,12 @@ MediaQueryExp::MediaQueryExp(const String& media_feature,
 
 MediaQueryExp MediaQueryExp::Create(const AtomicString& media_feature,
                                     CSSParserTokenStream& stream,
-                                    const CSSParserContext& context) {
-  if (auto value =
-          MediaQueryExpValue::Consume(media_feature, stream, context)) {
-    return MediaQueryExp(media_feature, *value);
+                                    const CSSParserContext& context,
+                                    bool supports_element_dependent) {
+  std::optional<MediaQueryExpValue> value = MediaQueryExpValue::Consume(
+      media_feature, stream, context, supports_element_dependent);
+  if (value.has_value()) {
+    return MediaQueryExp(media_feature, value.value());
   }
   return Invalid();
 }
@@ -431,7 +438,8 @@ MediaQueryExp MediaQueryExp::Create(const AtomicString& media_feature,
 std::optional<MediaQueryExpValue> MediaQueryExpValue::Consume(
     const String& media_feature,
     CSSParserTokenStream& stream,
-    const CSSParserContext& context) {
+    const CSSParserContext& context,
+    bool supports_element_dependent) {
   CSSParserContext::ParserModeOverridingScope scope(context, kHTMLStandardMode);
 
   if (CSSVariableParser::IsValidVariableName(media_feature)) {
@@ -479,10 +487,15 @@ std::optional<MediaQueryExpValue> MediaQueryExpValue::Consume(
     return std::nullopt;
   }
 
+  if (!supports_element_dependent && value->IsElementDependent()) {
+    return std::nullopt;
+  }
+
   // Now we have |value| as a number, length or resolution
   // Create value for media query expression that must have 1 or more values.
   if (FeatureWithAspectRatio(media_feature)) {
-    if (value->IsNegative() == CSSPrimitiveValue::BoolStatus::kTrue) {
+    if (value->GetValueIfKnown().has_value() &&
+        *value->GetValueIfKnown() < 0.0) {
       return std::nullopt;
     }
     if (!css_parsing_utils::ConsumeSlashIncludingWhitespace(stream)) {
@@ -495,8 +508,8 @@ std::optional<MediaQueryExpValue> MediaQueryExpValue::Consume(
     if (!denominator) {
       return std::nullopt;
     }
-    if (value->IsZero() == CSSPrimitiveValue::BoolStatus::kTrue &&
-        denominator->IsZero() == CSSPrimitiveValue::BoolStatus::kTrue) {
+    if (value->GetValueIfKnown() == 0.0 &&
+        denominator->GetValueIfKnown() == 0.0) {
       return MediaQueryExpValue(*CSSNumericLiteralValue::Create(
                                     1, CSSPrimitiveValue::UnitType::kNumber),
                                 *CSSNumericLiteralValue::Create(
@@ -760,8 +773,8 @@ MediaQueryExpNode::FeatureFlags MediaQueryFeatureExpNode::CollectFeatureFlags()
   } else if (exp_.MediaFeature() == media_feature_names::kSnappedMediaFeature) {
     return kFeatureSnap;
   } else if (exp_.MediaFeature() ==
-             media_feature_names::kOverflowingMediaFeature) {
-    return kFeatureOverflow;
+             media_feature_names::kScrollableMediaFeature) {
+    return kFeatureScrollable;
   } else if (exp_.IsInlineSizeDependent()) {
     return kFeatureInlineSize;
   } else if (exp_.IsBlockSizeDependent()) {

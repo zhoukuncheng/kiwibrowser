@@ -23,6 +23,7 @@
 
 #include <inttypes.h>
 
+#include "base/debug/dump_without_crashing.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "third_party/blink/public/common/features.h"
@@ -224,6 +225,7 @@ void LayoutView::ClearHitTestCache() {
 }
 
 LayoutUnit LayoutView::ComputeMinimumWidth() {
+  NOT_DESTROYED();
   const ComputedStyle& style = StyleRef();
   WritingMode mode = style.GetWritingMode();
   ConstraintSpaceBuilder builder(mode, style.GetWritingDirection(),
@@ -235,6 +237,7 @@ LayoutUnit LayoutView::ComputeMinimumWidth() {
 }
 
 void LayoutView::AddChild(LayoutObject* new_child, LayoutObject* before_child) {
+  NOT_DESTROYED();
   if (new_child->StyleRef().StyleType() == kPseudoIdViewTransition) {
     // The view-transition pseudo tree is needs to be laid out within the
     // "snapshot containing block". This is implemented by inserting an
@@ -328,8 +331,11 @@ void LayoutView::MapLocalToAncestor(const LayoutBoxModelObject* ancestor,
                                                    mode);
     } else {
       DCHECK(!ancestor);
-      if (mode & kApplyRemoteMainFrameTransform)
-        GetFrameView()->MapLocalToRemoteMainFrame(transform_state);
+      if (mode &
+          (kApplyRemoteMainFrameTransform | kApplyRemoteViewportTransform)) {
+        GetFrameView()->MapLocalToRemoteMainFrame(
+            transform_state, mode & kApplyRemoteViewportTransform);
+      }
     }
   }
 }
@@ -351,9 +357,11 @@ void LayoutView::MapAncestorToLocal(const LayoutBoxModelObject* ancestor,
       DCHECK(!ancestor);
       // Note that MapLocalToRemoteMainFrame is correct here because
       // transform_state will be set to kUnapplyInverseTransformDirection.
-      if ((mode & kApplyRemoteMainFrameTransform) &&
+      if ((mode &
+           (kApplyRemoteMainFrameTransform | kApplyRemoteViewportTransform)) &&
           GetFrame()->IsLocalRoot()) {
-        GetFrameView()->MapLocalToRemoteMainFrame(transform_state);
+        GetFrameView()->MapLocalToRemoteMainFrame(
+            transform_state, mode & kApplyRemoteViewportTransform);
       }
     }
   } else {
@@ -362,11 +370,13 @@ void LayoutView::MapAncestorToLocal(const LayoutBoxModelObject* ancestor,
 }
 
 LogicalSize LayoutView::InitialContainingBlockSize() const {
+  NOT_DESTROYED();
   return LogicalSize(LayoutUnit(ViewLogicalWidthForBoxSizing()),
                      LayoutUnit(ViewLogicalHeightForBoxSizing()));
 }
 
 TrackedDescendantsMap& LayoutView::SvgTextDescendantsMap() {
+  NOT_DESTROYED();
   if (!svg_text_descendants_)
     svg_text_descendants_ = MakeGarbageCollected<TrackedDescendantsMap>();
   return *svg_text_descendants_;
@@ -375,22 +385,26 @@ TrackedDescendantsMap& LayoutView::SvgTextDescendantsMap() {
 void LayoutView::RegisterVariableLengthTransformResult(
     const LayoutText& text,
     const VariableLengthTransformResult& result) {
+  NOT_DESTROYED();
   CHECK(text.HasVariableLengthTransform());
   text_to_variable_length_transform_result_.Set(&text, result);
 }
 
 void LayoutView::UnregisterVariableLengthTransformResult(
     const LayoutText& text) {
+  NOT_DESTROYED();
   text_to_variable_length_transform_result_.erase(&text);
 }
 
 VariableLengthTransformResult LayoutView::GetVariableLengthTransformResult(
     const LayoutText& text) {
+  NOT_DESTROYED();
   CHECK(text.HasVariableLengthTransform());
   return text_to_variable_length_transform_result_.at(&text);
 }
 
 LayoutViewTransitionRoot* LayoutView::GetViewTransitionRoot() const {
+  NOT_DESTROYED();
   // Returns nullptr if LastChild isn't a ViewTransitionRoot.
   return DynamicTo<LayoutViewTransitionRoot>(LastChild());
 }
@@ -422,7 +436,8 @@ bool LayoutView::MapToVisualRectInAncestorSpaceInternal(
     PhysicalRect rect = PhysicalRect::EnclosingRect(
         transform_state.LastPlanarQuad().BoundingBox());
     bool retval = GetFrameView()->MapToVisualRectInRemoteRootFrame(
-        rect, !(visual_rect_flags & kDontApplyMainFrameOverflowClip));
+        rect, !(visual_rect_flags & kDontApplyMainFrameOverflowClip),
+        visual_rect_flags & kVisualRectApplyRemoteViewportTransform);
     transform_state.SetQuad(gfx::QuadF(gfx::RectF(rect)));
     return retval;
   }
@@ -514,10 +529,18 @@ PhysicalRect LayoutView::ViewRect() const {
       // one pixel) than the frame on mobile viewport. Investigate why. Consider
       // adding `<meta name="viewport" content="width=device-width">` to the
       // HTML if this occurs.
-      CHECK_GE(transition->GetSnapshotRootSize().width(),
-               frame_view_->Size().width());
-      CHECK_GE(transition->GetSnapshotRootSize().height(),
-               frame_view_->Size().height());
+      if (transition->GetSnapshotRootSize().width() <
+              frame_view_->Size().width() ||
+          transition->GetSnapshotRootSize().height() <
+              frame_view_->Size().height()) {
+        // TODO(https://issues.chromium.org/362991812) This can happen on
+        // ChromeOS devices in portrait mode, and we need to investigate why.
+        base::debug::DumpWithoutCrashing();
+
+        transition->SkipTransitionSoon();
+        return PhysicalRect(PhysicalOffset(),
+                            PhysicalSize(frame_view_->Size()));
+      }
 
       return PhysicalRect(
           PhysicalOffset(transition->GetFrameToSnapshotRootOffset()),
@@ -679,6 +702,7 @@ void LayoutView::CalculateScrollbarModes(
 }
 
 AtomicString LayoutView::NamedPageAtIndex(wtf_size_t page_index) const {
+  NOT_DESTROYED();
   // If layout is dirty, it's not possible to look up page names reliably.
   DCHECK_GE(GetDocument().Lifecycle().GetState(),
             DocumentLifecycle::kLayoutClean);
@@ -755,14 +779,6 @@ const LayoutBox& LayoutView::RootBox() const {
   return To<LayoutBox>(*document_element->GetLayoutObject());
 }
 
-void LayoutView::InvalidateSvgRootsWithRelativeLengthDescendents() {
-  if (GetDocument().SvgExtensions() && !ShouldUsePaginatedLayout()) {
-    GetDocument()
-        .AccessSVGExtensions()
-        .InvalidateSVGRootsWithRelativeLengthDescendents();
-  }
-}
-
 void LayoutView::LayoutRoot() {
   NOT_DESTROYED();
   if (ShouldUsePaginatedLayout()) {
@@ -788,9 +804,8 @@ void LayoutView::LayoutRoot() {
       LogicalHeight() != ViewLogicalHeightForBoxSizing();
   DCHECK(!initial_containing_block_resize_handled_list_);
   if (is_resizing_initial_containing_block) {
-    InvalidateSvgRootsWithRelativeLengthDescendents();
     initial_containing_block_resize_handled_list_ =
-        MakeGarbageCollected<HeapHashSet<Member<const LayoutObject>>>();
+        MakeGarbageCollected<GCedHeapHashSet<Member<const LayoutObject>>>();
   }
 
   const auto& style = StyleRef();
@@ -999,6 +1014,7 @@ Vector<gfx::Rect> LayoutView::GetTickmarks() const {
 }
 
 bool LayoutView::IsFragmentationContextRoot() const {
+  NOT_DESTROYED();
   return ShouldUsePaginatedLayout();
 }
 
