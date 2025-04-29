@@ -27,7 +27,7 @@
 #include "chrome/browser/extensions/devtools_util.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/extensions/extension_management_test_util.h"
-#include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/extensions/external_provider_manager.h"
 #include "chrome/browser/policy/policy_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/crx_file/id_util.h"
@@ -39,6 +39,7 @@
 #include "extensions/browser/content_verifier/content_verify_job.h"
 #include "extensions/browser/content_verifier/test_utils.h"
 #include "extensions/browser/crx_file_info.h"
+#include "extensions/browser/disable_reason.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/external_install_info.h"
@@ -102,12 +103,12 @@ ChromeContentVerifierDelegate::VerifyInfo GetVerifyInfoAndForceHashes(
 
 class ContentVerifierTest : public ExtensionBrowserTest {
  public:
-  ContentVerifierTest() {}
-  ~ContentVerifierTest() override {}
+  ContentVerifierTest() = default;
+  ~ContentVerifierTest() override = default;
 
   void SetUp() override {
-    // Override content verification mode before ExtensionSystemImpl initializes
-    // ChromeContentVerifierDelegate.
+    // Override content verification mode before ChromeExtensionSystem
+    // initializes ChromeContentVerifierDelegate.
     ChromeContentVerifierDelegate::SetDefaultModeForTesting(
         ChromeContentVerifierDelegate::VerifyInfo::Mode::ENFORCE);
     ON_CALL(update_service_, StartUpdateCheck)
@@ -121,6 +122,10 @@ class ContentVerifierTest : public ExtensionBrowserTest {
   void TearDown() override {
     ExtensionBrowserTest::TearDown();
     ChromeContentVerifierDelegate::SetDefaultModeForTesting(std::nullopt);
+  }
+
+  ExternalProviderManager* external_provider_manager() {
+    return ExternalProviderManager::Get(profile());
   }
 
   bool ShouldEnableContentVerification() override { return true; }
@@ -140,7 +145,7 @@ class ContentVerifierTest : public ExtensionBrowserTest {
                              UpdateFoundCallback update_found_callback,
                              base::OnceClosure callback) {
     scoped_refptr<CrxInstaller> installer(
-        CrxInstaller::CreateSilent(extension_service()));
+        CrxInstaller::CreateSilent(profile()));
     installer->set_install_source(ManifestLocation::kExternalPolicyDownload);
     installer->set_install_immediately(true);
     installer->set_allow_silent_install(true);
@@ -230,8 +235,10 @@ class ContentVerifierTest : public ExtensionBrowserTest {
         ui_test_utils::BROWSER_TEST_NO_WAIT);
     EXPECT_TRUE(unload_observer.WaitForExtensionUnloaded());
     ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-    int reasons = prefs->GetDisableReasons(extension_id);
-    EXPECT_EQ(disable_reason::DISABLE_CORRUPTED, reasons);
+    DisableReasonSet reasons = prefs->GetDisableReasons(extension_id);
+    EXPECT_THAT(
+        prefs->GetDisableReasons(extension_id),
+        testing::UnorderedElementsAre(disable_reason::DISABLE_CORRUPTED));
   }
 
   // Reads private key from |private_key_path| and generates extension id using
@@ -493,8 +500,9 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTestWithForcedHashes,
 
   // ... for the reason of being corrupted...
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(extension->id());
-  EXPECT_EQ(disable_reason::DISABLE_CORRUPTED, reasons);
+  DisableReasonSet reasons = prefs->GetDisableReasons(extension->id());
+  EXPECT_THAT(reasons,
+              testing::UnorderedElementsAre(disable_reason::DISABLE_CORRUPTED));
 
   // ... And we should have recorded metrics for where we found the corruption.
   histogram_tester.ExpectUniqueSample(
@@ -598,7 +606,7 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, TestServiceWorker_AcrossSession) {
   EXPECT_FALSE(registry->disabled_extensions().Contains(extension->id()));
 
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  EXPECT_EQ(0, prefs->GetDisableReasons(extension->id()));
+  EXPECT_TRUE(prefs->GetDisableReasons(extension->id()).empty());
 
   {
     // Sanity check: The file on disk was still modified.
@@ -622,7 +630,7 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, TestServiceWorker_AcrossSession) {
   ASSERT_TRUE(listener.WaitUntilSatisfied());
   // Verify the extension is still enabled.
   EXPECT_TRUE(registry->enabled_extensions().Contains(extension->id()));
-  EXPECT_EQ(0, prefs->GetDisableReasons(extension->id()));
+  EXPECT_TRUE(prefs->GetDisableReasons(extension->id()).empty());
 
   // Verify that the modified worker did *not* run (the original worker did).
   base::Value script_value = BackgroundScriptExecutor::ExecuteScript(
@@ -649,10 +657,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, TestServiceWorker_AcrossSession) {
   // The extension should be disabled...
   EXPECT_FALSE(registry->enabled_extensions().Contains(extension->id()));
   EXPECT_TRUE(registry->disabled_extensions().Contains(extension->id()));
-
-  // ... for the reason of being corrupted...
-  EXPECT_EQ(disable_reason::DISABLE_CORRUPTED,
-            prefs->GetDisableReasons(extension->id()));
+  EXPECT_THAT(prefs->GetDisableReasons(extension->id()),
+              testing::UnorderedElementsAre(disable_reason::DISABLE_CORRUPTED));
 
   // ... And we should have recorded metrics for where we found the corruption.
   histogram_tester.ExpectUniqueSample(
@@ -671,7 +677,6 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, TestServiceWorker_AcrossSession) {
 // should not be allowed to be manually uninstalled/disabled by the user.
 IN_PROC_BROWSER_TEST_F(ContentVerifierTest, PolicyCorrupted) {
   ExtensionSystem* system = ExtensionSystem::Get(profile());
-  ExtensionService* service = system->extension_service();
 
   // The id of our test extension.
   ExtensionId kExtensionId("dkjgfphccejbobpbljnpjcmhmagkdoia");
@@ -680,14 +685,15 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, PolicyCorrupted) {
   content_verifier_test::ForceInstallProvider policy(kExtensionId);
   system->management_policy()->RegisterProvider(&policy);
   auto external_provider = std::make_unique<MockExternalProvider>(
-      service, ManifestLocation::kExternalPolicyDownload);
+      external_provider_manager(), ManifestLocation::kExternalPolicyDownload);
   external_provider->UpdateOrAddExtension(
       std::make_unique<ExternalInstallInfoUpdateUrl>(
           kExtensionId, std::string() /* install_parameter */,
           extension_urls::GetWebstoreUpdateUrl(),
           ManifestLocation::kExternalPolicyDownload, 0 /* creation_flags */,
           true /* mark_acknowldged */));
-  service->AddProviderForTesting(std::move(external_provider));
+  external_provider_manager()->AddProviderForTesting(
+      std::move(external_provider));
 
   base::FilePath crx_path =
       test_data_dir_.AppendASCII("content_verifier/v1.crx");
@@ -709,15 +715,15 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, PolicyCorrupted) {
   // Make sure the extension first got disabled due to corruption.
   EXPECT_TRUE(registry_observer.WaitForExtensionUnloaded());
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(kExtensionId);
-  EXPECT_TRUE(reasons & disable_reason::DISABLE_CORRUPTED);
+  DisableReasonSet reasons = prefs->GetDisableReasons(kExtensionId);
+  EXPECT_TRUE(reasons.contains(disable_reason::DISABLE_CORRUPTED));
 
   // Make sure the extension then got re-installed, and that after reinstall it
   // is no longer disabled due to corruption.
   EXPECT_TRUE(registry_observer.WaitForExtensionInstalled());
 
   reasons = prefs->GetDisableReasons(kExtensionId);
-  EXPECT_FALSE(reasons & disable_reason::DISABLE_CORRUPTED);
+  EXPECT_FALSE(reasons.contains(disable_reason::DISABLE_CORRUPTED));
   system->management_policy()->UnregisterProvider(&policy);
 }
 
@@ -727,7 +733,6 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest, PolicyCorrupted) {
 IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
                        ManualInstalledExtensionGotCorruptedThenForceInstalled) {
   ExtensionSystem* system = ExtensionSystem::Get(profile());
-  ExtensionService* service = system->extension_service();
 
   ExtensionId kTestExtensionId("dkjgfphccejbobpbljnpjcmhmagkdoia");
   base::FilePath crx_path =
@@ -746,8 +751,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
   // Make sure the extension first got disabled due to corruption.
   EXPECT_TRUE(registry_observer.WaitForExtensionUnloaded());
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(kTestExtensionId);
-  EXPECT_TRUE(reasons & disable_reason::DISABLE_CORRUPTED);
+  DisableReasonSet reasons = prefs->GetDisableReasons(kTestExtensionId);
+  EXPECT_TRUE(reasons.contains(disable_reason::DISABLE_CORRUPTED));
 
   VerifierObserver verifier_observer;
 
@@ -755,7 +760,7 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
   content_verifier_test::ForceInstallProvider policy(kTestExtensionId);
   system->management_policy()->RegisterProvider(&policy);
   auto external_provider = std::make_unique<MockExternalProvider>(
-      service, ManifestLocation::kExternalPolicyDownload);
+      external_provider_manager(), ManifestLocation::kExternalPolicyDownload);
 
   external_provider->UpdateOrAddExtension(
       std::make_unique<ExternalInstallInfoUpdateUrl>(
@@ -763,9 +768,10 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
           extension_urls::GetWebstoreUpdateUrl(),
           ManifestLocation::kExternalPolicyDownload, 0 /* creation_flags */,
           true /* mark_acknowldged */));
-  service->AddProviderForTesting(std::move(external_provider));
+  external_provider_manager()->AddProviderForTesting(
+      std::move(external_provider));
 
-  service->CheckForExternalUpdates();
+  external_provider_manager()->CheckForExternalUpdates();
   // Set our mock update client to check that the corrupt bit is set on the
   // data structure it receives.
   ON_CALL(update_service_, StartUpdateCheck)
@@ -780,7 +786,7 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
   verifier_observer.EnsureFetchCompleted(kTestExtensionId);
 
   reasons = prefs->GetDisableReasons(kTestExtensionId);
-  EXPECT_FALSE(reasons & disable_reason::DISABLE_CORRUPTED);
+  EXPECT_FALSE(reasons.contains(disable_reason::DISABLE_CORRUPTED));
   EXPECT_TRUE(extensions::ExtensionRegistry::Get(profile())
                   ->enabled_extensions()
                   .GetByID(kTestExtensionId));
@@ -801,7 +807,7 @@ class UserInstalledContentVerifierTest : public ContentVerifierTest {
                      UpdateFoundCallback update_found_callback,
                      base::OnceClosure callback) override {
     scoped_refptr<CrxInstaller> installer(
-        CrxInstaller::CreateSilent(extension_service()));
+        CrxInstaller::CreateSilent(profile()));
     installer->set_install_source(ManifestLocation::kInternal);
     installer->set_install_immediately(true);
     installer->set_allow_silent_install(true);
@@ -813,8 +819,8 @@ class UserInstalledContentVerifierTest : public ContentVerifierTest {
         test_data_dir_.AppendASCII(kStoragePermissionExtensionCrx));
   }
 
-  CorruptedExtensionReinstaller* corrupted_extension_reinstaller() {
-    return extension_service()->corrupted_extension_reinstaller();
+  CorruptedExtensionReinstaller* GetCorruptedExtensionReinstaller() {
+    return CorruptedExtensionReinstaller::Get(profile());
   }
 };
 
@@ -862,11 +868,11 @@ IN_PROC_BROWSER_TEST_F(UserInstalledContentVerifierTest,
 
   // The extension should be disabled and not be in expected to be repaired yet.
   EXPECT_FALSE(
-      corrupted_extension_reinstaller()->IsReinstallForCorruptionExpected(
+      GetCorruptedExtensionReinstaller()->IsReinstallForCorruptionExpected(
           kStoragePermissionExtensionId));
-  EXPECT_EQ(disable_reason::DISABLE_CORRUPTED,
-            ExtensionPrefs::Get(profile())->GetDisableReasons(
-                kStoragePermissionExtensionId));
+  EXPECT_THAT(ExtensionPrefs::Get(profile())->GetDisableReasons(
+                  kStoragePermissionExtensionId),
+              testing::UnorderedElementsAre(disable_reason::DISABLE_CORRUPTED));
 }
 
 // Now actually test what happens on the next startup after the PRE test above.
@@ -875,16 +881,17 @@ IN_PROC_BROWSER_TEST_F(UserInstalledContentVerifierTest,
                        DISABLED_UserInstalledCorruptedResourceOnStartup) {
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
   ExtensionRegistry* registry = ExtensionRegistry::Get(profile());
-  int disable_reasons = prefs->GetDisableReasons(kStoragePermissionExtensionId);
+  DisableReasonSet disable_reasons =
+      prefs->GetDisableReasons(kStoragePermissionExtensionId);
 
   // Depending on timing, the extension may have already been reinstalled
   // between SetUpInProcessBrowserTestFixture and now (usually not during local
   // testing on a developer machine, but sometimes on a heavily loaded system
   // such as the build waterfall / trybots). If the reinstall didn't already
   // happen, wait for it.
-  if (disable_reasons & disable_reason::DISABLE_CORRUPTED) {
+  if (disable_reasons.contains(disable_reason::DISABLE_CORRUPTED)) {
     EXPECT_TRUE(
-        corrupted_extension_reinstaller()->IsReinstallForCorruptionExpected(
+        GetCorruptedExtensionReinstaller()->IsReinstallForCorruptionExpected(
             kStoragePermissionExtensionId));
     TestExtensionRegistryObserver registry_observer(
         registry, kStoragePermissionExtensionId);
@@ -892,9 +899,9 @@ IN_PROC_BROWSER_TEST_F(UserInstalledContentVerifierTest,
     disable_reasons = prefs->GetDisableReasons(kStoragePermissionExtensionId);
   }
   EXPECT_FALSE(
-      corrupted_extension_reinstaller()->IsReinstallForCorruptionExpected(
+      GetCorruptedExtensionReinstaller()->IsReinstallForCorruptionExpected(
           kStoragePermissionExtensionId));
-  EXPECT_EQ(disable_reason::DISABLE_NONE, disable_reasons);
+  EXPECT_TRUE(disable_reasons.empty());
   const Extension* extension =
       ExtensionRegistry::Get(profile())->enabled_extensions().GetByID(
           kStoragePermissionExtensionId);
@@ -1094,10 +1101,11 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
   {
     // Add a helpful hint, in case the regression reappears.
     ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-    int reasons = prefs->GetDisableReasons(kTenMegResourceExtensionId);
-    EXPECT_EQ(disable_reason::DISABLE_NONE, reasons)
+    DisableReasonSet reasons =
+        prefs->GetDisableReasons(kTenMegResourceExtensionId);
+    EXPECT_TRUE(reasons.empty())
         << "Unexpected disable reasons. Includes corruption: "
-        << (reasons & disable_reason::DISABLE_CORRUPTED);
+        << (reasons.contains(disable_reason::DISABLE_CORRUPTED));
   }
   const Extension* extension =
       registry->enabled_extensions().GetByID(kTenMegResourceExtensionId);
@@ -1120,8 +1128,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
       browser(), page_url, 1, WindowOpenDisposition::CURRENT_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(kExtensionId);
-  EXPECT_EQ(0, reasons);
+  DisableReasonSet reasons = prefs->GetDisableReasons(kExtensionId);
+  EXPECT_TRUE(reasons.empty());
 }
 
 // Tests that navigating to an extension resource with '.' at end does not
@@ -1140,8 +1148,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
       browser(), page_url, 1, WindowOpenDisposition::CURRENT_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(kExtensionId);
-  EXPECT_EQ(disable_reason::DISABLE_NONE, reasons);
+  DisableReasonSet reasons = prefs->GetDisableReasons(kExtensionId);
+  EXPECT_TRUE(reasons.empty());
 }
 
 // Tests that navigating to an extension resource with incorrect case does not
@@ -1170,8 +1178,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierTest,
   EXPECT_EQ(ContentVerifyJob::NONE, job_observer.WaitForJobFinished());
 
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(extension_id);
-  EXPECT_EQ(disable_reason::DISABLE_NONE, reasons);
+  DisableReasonSet reasons = prefs->GetDisableReasons(extension_id);
+  EXPECT_TRUE(reasons.empty());
 }
 
 class ContentVerifierPolicyTest : public ContentVerifierTest {
@@ -1230,8 +1238,8 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierPolicyTest,
   verifier->VerifyFailedForTest(id_, ContentVerifyJob::HASH_MISMATCH);
   EXPECT_TRUE(registry_observer.WaitForExtensionUnloaded());
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
-  int reasons = prefs->GetDisableReasons(id_);
-  EXPECT_TRUE(reasons & disable_reason::DISABLE_CORRUPTED);
+  DisableReasonSet reasons = prefs->GetDisableReasons(id_);
+  EXPECT_TRUE(reasons.contains(disable_reason::DISABLE_CORRUPTED));
 }
 
 // Now actually test what happens on the next startup after the PRE test above.
@@ -1252,13 +1260,13 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierPolicyTest,
   // happen, wait for it.
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
   ExtensionRegistry* registry = ExtensionRegistry::Get(profile());
-  int disable_reasons = prefs->GetDisableReasons(id_);
-  if (disable_reasons & disable_reason::DISABLE_CORRUPTED) {
+  DisableReasonSet disable_reasons = prefs->GetDisableReasons(id_);
+  if (disable_reasons.contains(disable_reason::DISABLE_CORRUPTED)) {
     TestExtensionRegistryObserver registry_observer(registry, id_);
     EXPECT_TRUE(registry_observer.WaitForExtensionInstalled());
     disable_reasons = prefs->GetDisableReasons(id_);
   }
-  EXPECT_FALSE(disable_reasons & disable_reason::DISABLE_CORRUPTED);
+  EXPECT_FALSE(disable_reasons.contains(disable_reason::DISABLE_CORRUPTED));
   EXPECT_TRUE(registry->enabled_extensions().Contains(id_));
 }
 
@@ -1329,7 +1337,7 @@ IN_PROC_BROWSER_TEST_F(ContentVerifierPolicyTest, FailedUpdateRetries) {
   TestExtensionRegistryObserver registry_observer(registry, id_);
   {
     base::AutoReset<bool> disable_scope =
-        ExtensionService::DisableExternalUpdatesForTesting();
+        ExternalProviderManager::DisableExternalUpdatesForTesting();
     verifier->VerifyFailedForTest(id_, ContentVerifyJob::HASH_MISMATCH);
     EXPECT_TRUE(registry_observer.WaitForExtensionUnloaded());
 

@@ -44,18 +44,6 @@ public class PassthroughTabUngrouper implements TabUngrouper {
 
     @Override
     public void ungroupTabGroup(
-            int rootId,
-            boolean trailing,
-            boolean allowDialog,
-            @Nullable TabModelActionListener listener) {
-        Function<TabGroupModelFilter, List<Tab>> tabsFetcher =
-                (filter) -> getTabsToUngroup(filter, rootId);
-
-        ungroupTabsInternal(tabsFetcher, trailing, listener);
-    }
-
-    @Override
-    public void ungroupTabGroup(
             @NonNull Token tabGroupId,
             boolean trailing,
             boolean allowDialog,
@@ -70,12 +58,13 @@ public class PassthroughTabUngrouper implements TabUngrouper {
             Function<TabGroupModelFilter, List<Tab>> tabsFetcher,
             boolean trailing,
             @Nullable TabModelActionListener listener) {
-        assert mTabGroupModelFilterSupplier.hasValue();
-        TabGroupModelFilter filter = mTabGroupModelFilterSupplier.get();
-
+        TabGroupModelFilterInternal filter = getTabGroupModelFilter();
         @Nullable List<Tab> tabs = tabsFetcher.apply(filter);
         if (tabs == null || tabs.isEmpty()) return;
 
+        if (listener != null) {
+            listener.willPerformActionOrShowDialog(DialogType.NONE, /* willSkipDialog= */ true);
+        }
         doUngroupTabs(filter, tabs, trailing);
         if (listener != null) {
             listener.onConfirmationDialogResult(
@@ -84,7 +73,9 @@ public class PassthroughTabUngrouper implements TabUngrouper {
     }
 
     static void doUngroupTabs(
-            @NonNull TabGroupModelFilter filter, @NonNull List<Tab> tabs, boolean trailing) {
+            @NonNull TabGroupModelFilterInternal filter,
+            @NonNull List<Tab> tabs,
+            boolean trailing) {
         for (Tab tab : tabs) {
             filter.moveTabOutOfGroupInDirection(tab.getId(), trailing);
         }
@@ -92,10 +83,14 @@ public class PassthroughTabUngrouper implements TabUngrouper {
 
     static @Nullable List<Tab> getTabsToUngroup(
             @NonNull TabGroupModelFilter filter, @NonNull Token token) {
-        return getTabsToUngroup(filter, filter.getRootIdFromStableId(token));
+        return filter.getTabsInGroup(token);
     }
 
-    static @Nullable List<Tab> getTabsToUngroup(@NonNull TabGroupModelFilter filter, int rootId) {
-        return filter.getRelatedTabListForRootId(rootId);
+    private TabGroupModelFilterInternal getTabGroupModelFilter() {
+        @Nullable
+        TabGroupModelFilterInternal tabGroupModelFilter =
+                (TabGroupModelFilterInternal) mTabGroupModelFilterSupplier.get();
+        assert tabGroupModelFilter != null;
+        return tabGroupModelFilter;
     }
 }

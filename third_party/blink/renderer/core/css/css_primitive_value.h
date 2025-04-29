@@ -24,6 +24,8 @@
 
 #include <array>
 #include <bitset>
+#include <concepts>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_value.h"
 #include "third_party/blink/renderer/platform/geometry/length.h"
@@ -334,7 +336,18 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
     return unit == UnitType::kHertz || unit == UnitType::kKilohertz;
   }
   bool IsCalculated() const { return IsMathFunctionValue(); }
-  bool IsCalculatedPercentageWithLength() const;
+
+  // Whether we are able to resolve to a single value (possibly with a unit)
+  // before layout time; i.e. when parsing or calculating style. Things that
+  // must wait until layout include all sorts of size-dependent calculations,
+  // e.g. calc(100% + 10px) (will be reduced to a length in pixels, but only
+  // once we know how wide/tall 100% is), calc(sign(1em - 1px)) (-1, 0 or 1
+  // depending on the font size) and so on. Note that pure percentages
+  // (e.g. calc(80%)) are specifically allowed; a percentage value counts as
+  // a single value with the unit “%”. All values that are _not_ calc()
+  // will also by definition return true here.
+  bool IsResolvableBeforeLayout() const;
+
   static bool IsResolution(UnitType type) {
     return type >= UnitType::kDotsPerPixel &&
            type <= UnitType::kDotsPerCentimeter;
@@ -348,6 +361,13 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
   // a computed value using only the value of the property on the element, and
   // "global" information that cannot be changed by CSS.
   bool IsComputationallyIndependent() const;
+
+  // Returns true if the value has a calculation that depends on an element
+  // context. For instance sibling-index().
+  //
+  // Note that font-relative units are not element-dependent since they resolve
+  // against the initial font outside an element context.
+  bool IsElementDependent() const;
 
   // True if this value contains any of cq[w,h,i,b,min,max], false otherwise.
   bool HasContainerRelativeUnits() const;
@@ -371,17 +391,6 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
 
   // Converts to a Length (Fixed, Percent or Calculated)
   Length ConvertToLength(const CSSLengthResolver&) const;
-
-  enum class BoolStatus {
-    kTrue,
-    kFalse,
-    kUnresolvable,
-  };
-
-  BoolStatus IsZero() const;
-  BoolStatus IsOne() const;
-  BoolStatus IsHundred() const;
-  BoolStatus IsNegative() const;
 
   // this + value
   CSSPrimitiveValue* Add(double value, UnitType unit_type) const;
@@ -427,6 +436,8 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
   // These getters can be called only when |this| is a numeric literal or a math
   // expression can be resolved into a single numeric value *without any type
   // conversion* (e.g., between px and em). Otherwise, it hits a DCHECK.
+  // In particular, you cannot call this if IsResolvableBeforeLayout()
+  // returns false.
   double GetDoubleValue() const;
 
   // Returns Double Value including infinity, -infinity, and NaN.
@@ -434,19 +445,26 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
 
   float GetFloatValue() const { return GetValue<float>(); }
   int GetIntValue() const { return GetValue<int>(); }
+
   template <typename T>
-  inline T GetValue() const {
-    return ClampTo<T>(GetDoubleValue());
+    requires std::integral<T> || std::floating_point<T>
+  inline T ConvertTo(const CSSLengthResolver& length_resolver) const {
+    DCHECK(IsNumber() || IsPercentage());
+    return ClampTo<T>(ComputeNumber(length_resolver));
   }
 
-  template <typename T>
-  inline T ConvertTo(const CSSLengthResolver&)
-      const;  // Defined in CSSPrimitiveValueMappings.h
-
   int ComputeInteger(const CSSLengthResolver&) const;
+  // NOTE: As a special exception, we allow treating percentage values
+  // implicitly as numbers divided by 100. This allows us to parse using
+  // ConsumeNumberOrPercent() and call ComputeNumber() on whatever we get
+  // back.
   double ComputeNumber(const CSSLengthResolver&) const;
-  double ComputePercentage(const CSSLengthResolver&) const;
+
+  template <typename T = double>
+  T ComputePercentage(const CSSLengthResolver&) const;
   double ComputeValueInCanonicalUnit(const CSSLengthResolver&) const;
+
+  std::optional<double> GetValueIfKnown() const;
 
   static const char* UnitTypeToString(UnitType);
   static UnitType StringToUnitType(StringView string) {
@@ -482,6 +500,11 @@ class CORE_EXPORT CSSPrimitiveValue : public CSSValue {
   bool IsResolvableLength() const;
 
  private:
+  template <typename T>
+  inline T GetValue() const {
+    return ClampTo<T>(GetDoubleValue());
+  }
+
   bool InvolvesLayout() const;
   const CSSMathExpressionNode* ToMathExpressionNode() const;
 };

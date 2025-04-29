@@ -26,7 +26,7 @@ void SuccessCallback(bool* did_respond,
                      base::Value::List results,
                      const std::string& error,
                      mojom::ExtraResponseDataPtr) {
-  EXPECT_EQ(ExtensionFunction::ResponseType::SUCCEEDED, type);
+  EXPECT_EQ(ExtensionFunction::ResponseType::kSucceeded, type);
   *did_respond = true;
 }
 
@@ -35,7 +35,7 @@ void FailCallback(bool* did_respond,
                   base::Value::List results,
                   const std::string& error,
                   mojom::ExtraResponseDataPtr) {
-  EXPECT_EQ(ExtensionFunction::ResponseType::FAILED, type);
+  EXPECT_EQ(ExtensionFunction::ResponseType::kFailed, type);
   *did_respond = true;
 }
 
@@ -55,7 +55,7 @@ class ValidationFunction : public ExtensionFunction {
   bool did_respond() { return did_respond_; }
 
  private:
-  ~ValidationFunction() override {}
+  ~ValidationFunction() override = default;
   bool should_succeed_;
   bool did_respond_;
 };

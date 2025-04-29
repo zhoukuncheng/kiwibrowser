@@ -161,7 +161,8 @@ MostVisitedSites::MostVisitedSites(
     std::unique_ptr<PopularSites> popular_sites,
     std::unique_ptr<CustomLinksManager> custom_links,
     std::unique_ptr<IconCacher> icon_cacher,
-    bool is_default_chrome_app_migrated)
+    bool is_default_chrome_app_migrated,
+    bool is_custom_links_mixable)
     : prefs_(prefs),
       identity_manager_(identity_manager),
       supervised_user_service_(supervised_user_service),
@@ -170,8 +171,8 @@ MostVisitedSites::MostVisitedSites(
       custom_links_(std::move(custom_links)),
       icon_cacher_(std::move(icon_cacher)),
       is_default_chrome_app_migrated_(is_default_chrome_app_migrated),
+      is_custom_links_mixable_(is_custom_links_mixable),
       max_num_sites_(0u),
-      mv_source_(TileSource::TOP_SITES),
       is_observing_(false) {
   DCHECK(prefs_);
 #if BUILDFLAG(ENABLE_SUPERVISED_USERS)
@@ -213,8 +214,7 @@ bool MostVisitedSites::DoesSourceExist(TileSource source) const {
     case TileSource::CUSTOM_LINKS:
       return custom_links_ != nullptr;
   }
-  NOTREACHED_IN_MIGRATION();
-  return false;
+  NOTREACHED();
 }
 
 void MostVisitedSites::SetHomepageClient(
@@ -285,6 +285,8 @@ void MostVisitedSites::InitializeCustomLinks() {
     return;
   }
 
+  // TODO(crbug.com/397422358): Convert |current_tiles_| to |custom_links_|
+  // only if |is_custom_links_mixable_| is false.
   if (custom_links_->Initialize(current_tiles_.value())) {
     custom_links_action_count_ = 0;
   }
@@ -301,11 +303,12 @@ void MostVisitedSites::UninitializeCustomLinks() {
 }
 
 bool MostVisitedSites::IsCustomLinksInitialized() {
-  if (!custom_links_ || !IsCustomLinksEnabled()) {
-    return false;
-  }
+  return custom_links_ && IsCustomLinksEnabled() &&
+         custom_links_->IsInitialized();
+}
 
-  return custom_links_->IsInitialized();
+bool MostVisitedSites::IsExclusivelyCustomLinks() {
+  return !is_custom_links_mixable_ && IsCustomLinksInitialized();
 }
 
 void MostVisitedSites::EnableCustomLinks(bool enable) {
@@ -332,97 +335,29 @@ bool MostVisitedSites::IsShortcutsVisible() const {
 
 bool MostVisitedSites::AddCustomLink(const GURL& url,
                                      const std::u16string& title) {
-  if (!custom_links_ || !IsCustomLinksEnabled()) {
-    return false;
-  }
-
-  bool is_first_action = !custom_links_->IsInitialized();
-  // Initialize custom links if they have not been initialized yet.
-  InitializeCustomLinks();
-
-  bool success = custom_links_->AddLink(url, title);
-  if (success) {
-    if (custom_links_action_count_ != -1) {
-      custom_links_action_count_++;
-    }
-    BuildCurrentTiles();
-  } else if (is_first_action) {
-    // We don't want to keep custom links initialized if the first action after
-    // initialization failed.
-    UninitializeCustomLinks();
-  }
-  return success;
+  return ApplyCustomLinksAction(
+      base::BindOnce(&CustomLinksManager::AddLink,
+                     base::Unretained(custom_links_.get()), url, title));
 }
 
 bool MostVisitedSites::UpdateCustomLink(const GURL& url,
                                         const GURL& new_url,
                                         const std::u16string& new_title) {
-  if (!custom_links_ || !IsCustomLinksEnabled()) {
-    return false;
-  }
-
-  bool is_first_action = !custom_links_->IsInitialized();
-  // Initialize custom links if they have not been initialized yet.
-  InitializeCustomLinks();
-
-  bool success = custom_links_->UpdateLink(url, new_url, new_title);
-  if (success) {
-    if (custom_links_action_count_ != -1) {
-      custom_links_action_count_++;
-    }
-    BuildCurrentTiles();
-  } else if (is_first_action) {
-    // We don't want to keep custom links initialized if the first action after
-    // initialization failed.
-    UninitializeCustomLinks();
-  }
-  return success;
+  return ApplyCustomLinksAction(base::BindOnce(
+      &CustomLinksManager::UpdateLink, base::Unretained(custom_links_.get()),
+      url, new_url, new_title));
 }
 
 bool MostVisitedSites::ReorderCustomLink(const GURL& url, size_t new_pos) {
-  if (!custom_links_ || !IsCustomLinksEnabled()) {
-    return false;
-  }
-
-  bool is_first_action = !custom_links_->IsInitialized();
-  // Initialize custom links if they have not been initialized yet.
-  InitializeCustomLinks();
-
-  bool success = custom_links_->ReorderLink(url, new_pos);
-  if (success) {
-    if (custom_links_action_count_ != -1) {
-      custom_links_action_count_++;
-    }
-    BuildCurrentTiles();
-  } else if (is_first_action) {
-    // We don't want to keep custom links initialized if the first action after
-    // initialization failed.
-    UninitializeCustomLinks();
-  }
-  return success;
+  return ApplyCustomLinksAction(
+      base::BindOnce(&CustomLinksManager::ReorderLink,
+                     base::Unretained(custom_links_.get()), url, new_pos));
 }
 
 bool MostVisitedSites::DeleteCustomLink(const GURL& url) {
-  if (!custom_links_ || !IsCustomLinksEnabled()) {
-    return false;
-  }
-
-  bool is_first_action = !custom_links_->IsInitialized();
-  // Initialize custom links if they have not been initialized yet.
-  InitializeCustomLinks();
-
-  bool success = custom_links_->DeleteLink(url);
-  if (success) {
-    if (custom_links_action_count_ != -1) {
-      custom_links_action_count_++;
-    }
-    BuildCurrentTiles();
-  } else if (is_first_action) {
-    // We don't want to keep custom links initialized if the first action after
-    // initialization failed.
-    UninitializeCustomLinks();
-  }
-  return success;
+  return ApplyCustomLinksAction(
+      base::BindOnce(&CustomLinksManager::DeleteLink,
+                     base::Unretained(custom_links_.get()), url));
 }
 
 void MostVisitedSites::UndoCustomLinkAction() {
@@ -501,9 +436,8 @@ void MostVisitedSites::InitiateTopSitesQuery() {
 
 void MostVisitedSites::OnMostVisitedURLsAvailable(
     const history::MostVisitedURLList& visited_list) {
-  // Ignore the event if tiles are provided by custom links, which take
-  // precedence.
-  if (IsCustomLinksInitialized()) {
+  // Ignore the event if tiles are exclusively provided by custom links.
+  if (IsExclusivelyCustomLinks()) {
     return;
   }
 
@@ -537,17 +471,15 @@ void MostVisitedSites::OnMostVisitedURLsAvailable(
     tiles.push_back(std::move(tile));
   }
 
-  mv_source_ = TileSource::TOP_SITES;
   InitiateNotificationForNewTiles(std::move(tiles));
 }
 
 void MostVisitedSites::BuildCurrentTiles() {
-  if (IsCustomLinksInitialized()) {
+  if (IsExclusivelyCustomLinks()) {
     BuildCustomLinks(custom_links_->GetLinks());
     return;
   }
 
-  mv_source_ = TileSource::TOP_SITES;
   InitiateTopSitesQuery();
 }
 
@@ -683,6 +615,33 @@ NTPTilesVector MostVisitedSites::InsertHomeTile(
   return new_tiles;
 }
 
+// Ensures |custom_links_| is initialized (exits on failure), then runs
+// |custom_links_action|. On success, builds the tileset. On failure, if this is
+// the first custom link action then uninitialize custom links.
+bool MostVisitedSites::ApplyCustomLinksAction(
+    base::OnceCallback<bool()> custom_links_action) {
+  if (!custom_links_ || !IsCustomLinksEnabled()) {
+    return false;
+  }
+
+  bool is_first_action = !custom_links_->IsInitialized();
+  // Initialize custom links if they have not been initialized yet.
+  InitializeCustomLinks();
+
+  bool success = std::move(custom_links_action).Run();
+  if (success) {
+    if (custom_links_action_count_ != -1) {
+      custom_links_action_count_++;
+    }
+    BuildCurrentTiles();
+  } else if (is_first_action) {
+    // We don't want to keep custom links initialized if the first action after
+    // initialization failed.
+    UninitializeCustomLinks();
+  }
+  return success;
+}
+
 void MostVisitedSites::OnCustomLinksChanged() {
   DCHECK(custom_links_);
   if (!IsCustomLinksEnabled()) {
@@ -723,7 +682,6 @@ void MostVisitedSites::BuildCustomLinks(
     tiles.push_back(std::move(tile));
   }
 
-  mv_source_ = TileSource::CUSTOM_LINKS;
   SaveTilesAndNotify(std::move(tiles), std::map<SectionType, NTPTilesVector>());
 }
 
@@ -868,8 +826,7 @@ void MostVisitedSites::TopSitesLoaded(TopSites* top_sites) {}
 
 void MostVisitedSites::TopSitesChanged(TopSites* top_sites,
                                        ChangeReason change_reason) {
-  if (mv_source_ == TileSource::TOP_SITES) {
-    // The displayed tiles are invalidated.
+  if (!IsExclusivelyCustomLinks()) {
     InitiateTopSitesQuery();
   }
 }

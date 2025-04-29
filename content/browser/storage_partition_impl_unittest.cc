@@ -83,11 +83,13 @@
 #include "net/base/schemeful_site.h"
 #include "net/base/test_completion_callback.h"
 #include "net/cookies/canonical_cookie.h"
+#include "net/cookies/cookie_access_params.h"
 #include "net/cookies/cookie_access_result.h"
 #include "net/cookies/cookie_inclusion_status.h"
 #include "ppapi/buildflags/buildflags.h"
 #include "services/network/cookie_manager.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/test/mock_device_bound_session_manager.h"
 #include "storage/browser/quota/quota_client_type.h"
 #include "storage/browser/quota/quota_manager.h"
 #include "storage/browser/quota/quota_manager_proxy.h"
@@ -113,17 +115,18 @@
 using net::CanonicalCookie;
 using CookieDeletionFilter = network::mojom::CookieDeletionFilter;
 using CookieDeletionFilterPtr = network::mojom::CookieDeletionFilterPtr;
+using ::testing::_;
+using ::testing::DoAll;
+using ::testing::Eq;
+using ::testing::Invoke;
+using ::testing::SaveArgPointee;
+using ::testing::WithArg;
 
 namespace content {
 namespace {
 
 const char kCacheKey[] = "key";
 const char kCacheValue[] = "cached value";
-
-const blink::mojom::StorageType kTemporary =
-    blink::mojom::StorageType::kTemporary;
-const blink::mojom::StorageType kSyncable =
-    blink::mojom::StorageType::kSyncable;
 
 const storage::QuotaClientType kClientFile =
     storage::QuotaClientType::kFileSystem;
@@ -141,25 +144,32 @@ class RemoveCookieTester {
   RemoveCookieTester& operator=(const RemoveCookieTester&) = delete;
 
   // Returns true, if the given cookie exists in the cookie store.
-  bool ContainsCookie(const url::Origin& origin) {
+  bool ContainsCookie(const url::Origin& origin,
+                      std::optional<net::CookiePartitionKey>
+                          cookie_partition_key = std::nullopt) {
     get_cookie_success_ = false;
     base::RunLoop loop;
     storage_partition_->GetCookieManagerForBrowserProcess()->GetCookieList(
         origin.GetURL(), net::CookieOptions::MakeAllInclusive(),
-        net::CookiePartitionKeyCollection(),
+        net::CookiePartitionKeyCollection::FromOptional(cookie_partition_key),
         base::BindOnce(&RemoveCookieTester::GetCookieListCallback,
                        base::Unretained(this), loop.QuitClosure()));
     loop.Run();
     return get_cookie_success_;
   }
 
-  void AddCookie(const url::Origin& origin) {
+  void AddCookie(const url::Origin& origin,
+                 std::optional<net::CookiePartitionKey> cookie_partition_key =
+                     std::nullopt) {
     net::CookieInclusionStatus status;
+    std::string cookie_str = "A=1";
+    if (cookie_partition_key) {
+      cookie_str += ";Partitioned;Secure;";
+    }
     std::unique_ptr<net::CanonicalCookie> cc(
         net::CanonicalCookie::CreateForTesting(
-            origin.GetURL(), "A=1", base::Time::Now(),
-            /*server_time=*/std::nullopt,
-            /*cookie_partition_key=*/std::nullopt,
+            origin.GetURL(), cookie_str, base::Time::Now(),
+            /*server_time=*/std::nullopt, cookie_partition_key,
             net::CookieSourceType::kUnknown, &status));
     base::RunLoop loop;
     storage_partition_->GetCookieManagerForBrowserProcess()->SetCanonicalCookie(
@@ -177,6 +187,10 @@ class RemoveCookieTester {
     std::string cookie_line =
         net::CanonicalCookie::BuildCookieLine(cookie_list);
     if (cookie_line == "A=1") {
+      get_cookie_success_ = true;
+    } else if (cookie_line == "A=1; A=1") {
+      EXPECT_NE(cookie_list[0].cookie.IsPartitioned(),
+                cookie_list[1].cookie.IsPartitioned());
       get_cookie_success_ = true;
     } else {
       EXPECT_EQ("", cookie_line);
@@ -630,9 +644,9 @@ void ClearQuotaDataForOrigin(content::StoragePartition* partition,
       delete_begin, base::Time::Max(), loop_to_quit->QuitClosure());
 }
 
-void ClearQuotaDataForTemporary(content::StoragePartition* partition,
-                                const base::Time delete_begin,
-                                base::RunLoop* loop_to_quit) {
+void ClearQuotaDataTime(content::StoragePartition* partition,
+                        const base::Time delete_begin,
+                        base::RunLoop* loop_to_quit) {
   partition->ClearData(kAllQuotaRemoveMask,
                        StoragePartition::QUOTA_MANAGED_STORAGE_MASK_TEMPORARY,
                        blink::StorageKey(), delete_begin, base::Time::Max(),
@@ -745,7 +759,8 @@ bool FilterMatchesCookie(const CookieDeletionFilterPtr& filter,
                          const net::CanonicalCookie& cookie) {
   return network::DeletionFilterToInfo(filter.Clone())
       .Matches(cookie, net::CookieAccessParams{
-                           net::CookieAccessSemantics::NONLEGACY, false});
+                           net::CookieAccessSemantics::NONLEGACY,
+                           net::CookieScopeSemantics::UNKNOWN, false});
 }
 
 }  // namespace
@@ -756,8 +771,8 @@ class StoragePartitionImplTest : public testing::Test {
       : task_environment_(content::BrowserTaskEnvironment::IO_MAINLOOP,
                           base::test::TaskEnvironment::TimeSource::MOCK_TIME),
         browser_context_(new TestBrowserContext()) {
-    feature_list_.InitWithFeatures({blink::features::kInterestGroupStorage,
-                                    blink::features::kSharedStorageAPI},
+    feature_list_.InitWithFeatures({network::features::kInterestGroupStorage,
+                                    network::features::kSharedStorageAPI},
                                    {});
   }
 
@@ -776,9 +791,7 @@ class StoragePartitionImplTest : public testing::Test {
               quota_manager_->proxy(), storage::QuotaClientType::kFileSystem),
           quota_client.InitWithNewPipeAndPassReceiver());
       quota_manager_->proxy()->RegisterClient(
-          std::move(quota_client), storage::QuotaClientType::kFileSystem,
-          {blink::mojom::StorageType::kTemporary,
-           blink::mojom::StorageType::kSyncable});
+          std::move(quota_client), storage::QuotaClientType::kFileSystem);
     }
     return quota_manager_.get();
   }
@@ -877,55 +890,24 @@ storage::BucketInfo AddQuotaManagedBucket(
     storage::MockQuotaManager* manager,
     const blink::StorageKey& storage_key,
     const std::string& bucket_name,
-    blink::mojom::StorageType type,
     base::Time modified = base::Time::Now()) {
   storage::BucketInfo bucket =
-      manager->CreateBucket({storage_key, bucket_name}, type);
+      manager->CreateBucket({storage_key, bucket_name});
   manager->AddBucket(bucket, {kClientFile}, modified);
   EXPECT_TRUE(manager->BucketHasData(bucket, kClientFile));
   return bucket;
 }
 
-TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverBoth) {
-  const blink::StorageKey kStorageKey1 =
-      blink::StorageKey::CreateFromStringForTesting("http://host1:1/");
-  const blink::StorageKey kStorageKey2 =
-      blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
-  const blink::StorageKey kStorageKey3 =
-      blink::StorageKey::CreateFromStringForTesting("http://host3:1/");
-
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                        storage::kDefaultBucketName, kTemporary);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kTemporary);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kSyncable);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey3,
-                        storage::kDefaultBucketName, kSyncable);
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 4);
-
-  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
-      browser_context()->GetDefaultStoragePartition());
-  partition->OverrideQuotaManagerForTesting(GetMockManager());
-
-  base::RunLoop run_loop;
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&ClearQuotaData, partition, &run_loop));
-  run_loop.Run();
-
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 0);
-}
-
-TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverOnlyTemporary) {
+TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForever) {
   const blink::StorageKey kStorageKey1 =
       blink::StorageKey::CreateFromStringForTesting("http://host1:1/");
   const blink::StorageKey kStorageKey2 =
       blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
 
   AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                        storage::kDefaultBucketName, kTemporary);
+                        storage::kDefaultBucketName);
   AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kTemporary);
+                        storage::kDefaultBucketName);
   EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
 
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
@@ -940,31 +922,7 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverOnlyTemporary) {
   EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 0);
 }
 
-TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverOnlySyncable) {
-  const blink::StorageKey kStorageKey1 =
-      blink::StorageKey::CreateFromStringForTesting("http://host1:1/");
-  const blink::StorageKey kStorageKey2 =
-      blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
-
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                        storage::kDefaultBucketName, kSyncable);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kSyncable);
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
-
-  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
-      browser_context()->GetDefaultStoragePartition());
-  partition->OverrideQuotaManagerForTesting(GetMockManager());
-
-  base::RunLoop run_loop;
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&ClearQuotaData, partition, &run_loop));
-  run_loop.Run();
-
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 0);
-}
-
-TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverNeither) {
+TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverNone) {
   EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 0);
 
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
@@ -984,19 +942,13 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverSpecificOrigin) {
       blink::StorageKey::CreateFromStringForTesting("http://host1:1/");
   const blink::StorageKey kStorageKey2 =
       blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
-  const blink::StorageKey kStorageKey3 =
-      blink::StorageKey::CreateFromStringForTesting("http://host3:1/");
 
-  storage::BucketInfo host1_temp_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey1, storage::kDefaultBucketName, kTemporary);
-  storage::BucketInfo host2_temp_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey2, storage::kDefaultBucketName, kTemporary);
-  storage::BucketInfo host2_sync_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey2, storage::kDefaultBucketName, kSyncable);
-  storage::BucketInfo host3_sync_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey3, storage::kDefaultBucketName, kSyncable);
+  storage::BucketInfo host1_bucket = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey1, storage::kDefaultBucketName);
+  storage::BucketInfo host2_bucket = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey2, storage::kDefaultBucketName);
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 4);
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
 
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
       browser_context()->GetDefaultStoragePartition());
@@ -1009,11 +961,9 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForeverSpecificOrigin) {
                      kStorageKey1.origin().GetURL(), base::Time(), &run_loop));
   run_loop.Run();
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 3);
-  EXPECT_FALSE(GetMockManager()->BucketHasData(host1_temp_bucket, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host2_temp_bucket, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host2_sync_bucket, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host3_sync_bucket, kClientFile));
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 1);
+  EXPECT_FALSE(GetMockManager()->BucketHasData(host1_bucket, kClientFile));
+  EXPECT_TRUE(GetMockManager()->BucketHasData(host2_bucket, kClientFile));
 }
 
 TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForLastHour) {
@@ -1026,30 +976,19 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForLastHour) {
 
   // Buckets modified now.
   base::Time now = base::Time::Now();
-  storage::BucketInfo host1_temp_bucket_now = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey1, "temp_bucket_now", kTemporary, now);
-  storage::BucketInfo host1_sync_bucket_now =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                            storage::kDefaultBucketName, kSyncable, now);
-  storage::BucketInfo host2_temp_bucket_now = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey2, "temp_bucket_now", kTemporary, now);
-  storage::BucketInfo host2_sync_bucket_now =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                            storage::kDefaultBucketName, kSyncable, now);
+  storage::BucketInfo host1_bucket_now =
+      AddQuotaManagedBucket(GetMockManager(), kStorageKey1, "bucket_now", now);
+  storage::BucketInfo host2_bucket_now =
+      AddQuotaManagedBucket(GetMockManager(), kStorageKey2, "bucket_now", now);
 
   // Buckets modified a day ago.
   base::Time yesterday = now - base::Days(1);
-  storage::BucketInfo host1_temp_bucket_yesterday =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                            "temp_bucket_yesterday", kTemporary, yesterday);
-  storage::BucketInfo host2_temp_bucket_yesterday =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                            "temp_bucket_yesterday", kTemporary, yesterday);
-  storage::BucketInfo host3_sync_bucket_yesterday =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey3,
-                            storage::kDefaultBucketName, kSyncable, yesterday);
+  storage::BucketInfo host1_bucket_yesterday = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey1, "bucket_yesterday", yesterday);
+  storage::BucketInfo host2_bucket_yesterday = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey2, "bucket_yesterday", yesterday);
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 7);
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 4);
 
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
       browser_context()->GetDefaultStoragePartition());
@@ -1061,44 +1000,31 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForLastHour) {
                                 base::Time::Now() - base::Hours(1), &run_loop));
   run_loop.Run();
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 3);
-  EXPECT_FALSE(
-      GetMockManager()->BucketHasData(host1_temp_bucket_now, kClientFile));
-  EXPECT_FALSE(
-      GetMockManager()->BucketHasData(host1_sync_bucket_now, kClientFile));
-  EXPECT_FALSE(
-      GetMockManager()->BucketHasData(host2_temp_bucket_now, kClientFile));
-  EXPECT_FALSE(
-      GetMockManager()->BucketHasData(host2_sync_bucket_now, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host1_temp_bucket_yesterday,
-                                              kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host3_sync_bucket_yesterday,
-                                              kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host2_temp_bucket_yesterday,
-                                              kClientFile));
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
+  EXPECT_FALSE(GetMockManager()->BucketHasData(host1_bucket_now, kClientFile));
+  EXPECT_FALSE(GetMockManager()->BucketHasData(host2_bucket_now, kClientFile));
+  EXPECT_TRUE(
+      GetMockManager()->BucketHasData(host1_bucket_yesterday, kClientFile));
+  EXPECT_TRUE(
+      GetMockManager()->BucketHasData(host2_bucket_yesterday, kClientFile));
 }
 
-TEST_F(StoragePartitionImplTest, RemoveQuotaManagedTemporaryDataForLastWeek) {
+TEST_F(StoragePartitionImplTest, RemoveQuotaManagedDataForLastWeek) {
   const blink::StorageKey kStorageKey =
       blink::StorageKey::CreateFromStringForTesting("http://host1:1/");
 
   // Buckets modified yesterday.
   base::Time now = base::Time::Now();
   base::Time yesterday = now - base::Days(1);
-  storage::BucketInfo temp_bucket_yesterday =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey,
-                            "temp_bucket_yesterday", kTemporary, yesterday);
-  storage::BucketInfo sync_bucket_yesterday =
-      AddQuotaManagedBucket(GetMockManager(), kStorageKey,
-                            storage::kDefaultBucketName, kSyncable, yesterday);
+  storage::BucketInfo bucket_yesterday = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey, "bucket_yesterday", yesterday);
 
   // Buckets modified 10 days ago.
   base::Time ten_days_ago = now - base::Days(10);
-  storage::BucketInfo temp_bucket_ten_days_ago = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey, "temp_bucket_ten_days_ago", kTemporary,
-      ten_days_ago);
+  storage::BucketInfo bucket_ten_days_ago = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey, "bucket_ten_days_ago", ten_days_ago);
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 3);
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
 
   base::RunLoop run_loop;
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
@@ -1106,17 +1032,14 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedTemporaryDataForLastWeek) {
   partition->OverrideQuotaManagerForTesting(GetMockManager());
 
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&ClearQuotaDataForTemporary, partition,
+      FROM_HERE, base::BindOnce(&ClearQuotaDataTime, partition,
                                 base::Time::Now() - base::Days(7), &run_loop));
   run_loop.Run();
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
-  EXPECT_FALSE(
-      GetMockManager()->BucketHasData(temp_bucket_yesterday, kClientFile));
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 1);
+  EXPECT_FALSE(GetMockManager()->BucketHasData(bucket_yesterday, kClientFile));
   EXPECT_TRUE(
-      GetMockManager()->BucketHasData(sync_bucket_yesterday, kClientFile));
-  EXPECT_TRUE(
-      GetMockManager()->BucketHasData(temp_bucket_ten_days_ago, kClientFile));
+      GetMockManager()->BucketHasData(bucket_ten_days_ago, kClientFile));
 }
 
 TEST_F(StoragePartitionImplTest, RemoveQuotaManagedUnprotectedOrigins) {
@@ -1125,16 +1048,12 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedUnprotectedOrigins) {
   const blink::StorageKey kStorageKey2 =
       blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
 
-  storage::BucketInfo host1_temp_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey1, storage::kDefaultBucketName, kTemporary);
-  storage::BucketInfo host1_sync_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey1, storage::kDefaultBucketName, kSyncable);
-  storage::BucketInfo host2_temp_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey2, storage::kDefaultBucketName, kTemporary);
-  storage::BucketInfo host2_sync_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey2, storage::kDefaultBucketName, kSyncable);
+  storage::BucketInfo host1_bucket = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey1, storage::kDefaultBucketName);
+  storage::BucketInfo host2_bucket = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey2, storage::kDefaultBucketName);
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 4);
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
 
   // Protect kStorageKey1.
   auto mock_policy = base::MakeRefCounted<storage::MockSpecialStoragePolicy>();
@@ -1153,11 +1072,9 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedUnprotectedOrigins) {
                      base::Time(), &run_loop));
   run_loop.Run();
 
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host1_temp_bucket, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(host1_sync_bucket, kClientFile));
-  EXPECT_FALSE(GetMockManager()->BucketHasData(host2_temp_bucket, kClientFile));
-  EXPECT_FALSE(GetMockManager()->BucketHasData(host2_sync_bucket, kClientFile));
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 1);
+  EXPECT_TRUE(GetMockManager()->BucketHasData(host1_bucket, kClientFile));
+  EXPECT_FALSE(GetMockManager()->BucketHasData(host2_bucket, kClientFile));
 }
 
 TEST_F(StoragePartitionImplTest, RemoveQuotaManagedProtectedOrigins) {
@@ -1167,14 +1084,10 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedProtectedOrigins) {
       blink::StorageKey::CreateFromStringForTesting("http://host2:1/");
 
   AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                        storage::kDefaultBucketName, kTemporary);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey1,
-                        storage::kDefaultBucketName, kSyncable);
+                        storage::kDefaultBucketName);
   AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kTemporary);
-  AddQuotaManagedBucket(GetMockManager(), kStorageKey2,
-                        storage::kDefaultBucketName, kSyncable);
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 4);
+                        storage::kDefaultBucketName);
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
 
   // Protect kStorageKey1.
   auto mock_policy = base::MakeRefCounted<storage::MockSpecialStoragePolicy>();
@@ -1203,13 +1116,9 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedIgnoreDevTools) {
       blink::StorageKey::CreateFromStringForTesting(
           "devtools://abcdefghijklmnopqrstuvw/");
 
-  storage::BucketInfo temp_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey, storage::kDefaultBucketName, kTemporary,
-      base::Time());
-  storage::BucketInfo sync_bucket = AddQuotaManagedBucket(
-      GetMockManager(), kStorageKey, storage::kDefaultBucketName, kSyncable,
-      base::Time());
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
+  storage::BucketInfo bucket = AddQuotaManagedBucket(
+      GetMockManager(), kStorageKey, storage::kDefaultBucketName, base::Time());
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 1);
 
   base::RunLoop run_loop;
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
@@ -1224,9 +1133,8 @@ TEST_F(StoragePartitionImplTest, RemoveQuotaManagedIgnoreDevTools) {
   run_loop.Run();
 
   // Check that devtools data isn't removed.
-  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 2);
-  EXPECT_TRUE(GetMockManager()->BucketHasData(temp_bucket, kClientFile));
-  EXPECT_TRUE(GetMockManager()->BucketHasData(sync_bucket, kClientFile));
+  EXPECT_EQ(GetMockManager()->BucketDataCount(kClientFile), 1);
+  EXPECT_TRUE(GetMockManager()->BucketHasData(bucket, kClientFile));
 }
 
 TEST_F(StoragePartitionImplTest, RemoveCookieForever) {
@@ -2283,6 +2191,36 @@ TEST(StorageServiceImplOnSequenceLocalStorage, ThreadDestructionDoesNotFail) {
   }
 }
 
+#if BUILDFLAG(ENABLE_DEVICE_BOUND_SESSIONS)
+TEST_F(StoragePartitionImplTest, RemoveDeviceBoundSessions) {
+  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
+      browser_context()->GetDefaultStoragePartition());
+  auto device_bound_session_manager =
+      std::make_unique<network::MockDeviceBoundSessionManager>();
+  network::MockDeviceBoundSessionManager* device_bound_session_manager_raw =
+      device_bound_session_manager.get();
+  partition->OverrideDeviceBoundSessionManagerForTesting(
+      std::move(device_bound_session_manager));
+
+  base::Time created_before_time = base::Time::Now() - base::Days(1);
+  base::Time created_after_time = base::Time::Now() - base::Days(3);
+
+  EXPECT_CALL(
+      *device_bound_session_manager_raw,
+      DeleteAllSessions(Eq(created_after_time), Eq(created_before_time), _, _))
+      .WillOnce(WithArg<3>(Invoke([](base::OnceClosure completion_closure) {
+        std::move(completion_closure).Run();
+      })));
+
+  base::RunLoop run_loop;
+  partition->ClearData(StoragePartition::REMOVE_DATA_MASK_DEVICE_BOUND_SESSIONS,
+                       StoragePartition::QUOTA_MANAGED_STORAGE_MASK_ALL,
+                       blink::StorageKey(), created_after_time,
+                       created_before_time, run_loop.QuitClosure());
+  run_loop.Run();
+}
+#endif
+
 class StoragePartitionImplSharedStorageTest : public StoragePartitionImplTest {
  public:
   StoragePartitionImplSharedStorageTest()
@@ -2290,8 +2228,8 @@ class StoragePartitionImplSharedStorageTest : public StoragePartitionImplTest {
         shared_storage_manager_(
             static_cast<StoragePartitionImpl*>(storage_partition_)
                 ->GetSharedStorageManager()) {
-    feature_list_.InitWithFeatures({blink::features::kInterestGroupStorage,
-                                    blink::features::kSharedStorageAPI},
+    feature_list_.InitWithFeatures({network::features::kInterestGroupStorage,
+                                    network::features::kSharedStorageAPI},
                                    {});
   }
 
@@ -2523,6 +2461,63 @@ TEST_F(StoragePartitionImplTest, PrivateNetworkAccessPermission) {
       GURL(), net::IPAddress(192, 163, 1, 1), "test-id", "test-name",
       base::BindOnce(grant_permission.GetCallback()));
   EXPECT_FALSE(grant_permission.Get());
+}
+
+TEST_F(StoragePartitionImplTest, LocalNetworkAccessPermission) {
+  base::test::ScopedFeatureList features(
+      network::features::kLocalNetworkAccessChecks);
+
+  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
+      browser_context()->GetDefaultStoragePartition());
+
+  mojo::Remote<network::mojom::URLLoaderNetworkServiceObserver> observer(
+      partition->CreateAuthCertObserverForServiceWorker(
+          network::mojom::kBrowserProcessId));
+
+  base::test::TestFuture<bool> grant_permission;
+  observer->OnLocalNetworkAccessPermissionRequired(
+      base::BindOnce(grant_permission.GetCallback()));
+  EXPECT_FALSE(grant_permission.Get());
+}
+
+TEST_F(StoragePartitionImplTest, ClearDataStorageKeyDeletesPartitionedCookies) {
+  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
+      browser_context()->GetDefaultStoragePartition());
+  RemoveCookieTester tester(partition);
+
+  const auto kOrigin = url::Origin::Create(GURL("https://example.com"));
+  const auto kPartitionKey =
+      net::CookiePartitionKey::FromURLForTesting(GURL("https://a.com"));
+  const auto kOtherPartitionKey =
+      net::CookiePartitionKey::FromURLForTesting(GURL("https://b.com"));
+
+  // Unpartitioned cookie.
+  tester.AddCookie(kOrigin);
+  // Partitioned cookie with two keys.
+  tester.AddCookie(kOrigin, kPartitionKey);
+  tester.AddCookie(kOrigin, kOtherPartitionKey);
+
+  ASSERT_TRUE(tester.ContainsCookie(kOrigin));
+  ASSERT_TRUE(tester.ContainsCookie(kOrigin, kPartitionKey));
+  ASSERT_TRUE(tester.ContainsCookie(kOrigin, kOtherPartitionKey));
+
+  blink::StorageKey storage_key = blink::StorageKey::Create(
+      kOrigin, net::SchemefulSite(GURL("https://a.com")),
+      blink::mojom::AncestorChainBit::kCrossSite);
+  ASSERT_EQ(storage_key.ToCookiePartitionKey(), kPartitionKey);
+
+  base::RunLoop run_loop;
+  partition->ClearData(StoragePartition::REMOVE_DATA_MASK_COOKIES,
+                       StoragePartition::QUOTA_MANAGED_STORAGE_MASK_ALL,
+                       storage_key, base::Time(), base::Time::Max(),
+                       run_loop.QuitClosure());
+  run_loop.Run();
+
+  // Should delete unpartitioned cookies and those in matching partition.
+  EXPECT_FALSE(tester.ContainsCookie(kOrigin));
+  EXPECT_FALSE(tester.ContainsCookie(kOrigin, kPartitionKey));
+  // Should not delete cookies in other partitions.
+  EXPECT_TRUE(tester.ContainsCookie(kOrigin, kOtherPartitionKey));
 }
 
 }  // namespace content

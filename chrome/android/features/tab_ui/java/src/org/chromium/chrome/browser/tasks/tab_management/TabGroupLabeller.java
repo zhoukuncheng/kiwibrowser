@@ -34,7 +34,7 @@ public class TabGroupLabeller extends TabObjectLabeller {
     @Override
     protected boolean shouldApply(PersistentMessage message) {
         return mTabGroupModelFilterSupplier.get() != null
-                && !mTabGroupModelFilterSupplier.get().isOffTheRecord()
+                && !mTabGroupModelFilterSupplier.get().getTabModel().isOffTheRecord()
                 && message.type == PersistentNotificationType.DIRTY_TAB_GROUP
                 && getTabId(message) != Tab.INVALID_TAB_ID;
     }
@@ -56,7 +56,12 @@ public class TabGroupLabeller extends TabObjectLabeller {
         if (tabGroupId == null) {
             return Tab.INVALID_TAB_ID;
         } else {
-            return mTabGroupModelFilterSupplier.get().getRootIdFromStableId(tabGroupId);
+            // Tabs in the TabListMediator are represented by the last shown tab ID in a tab group.
+            // This is a workaround to achieve compatibility. Longer term, TabListMediator needs to
+            // be refactored to accept either rootId or even better tabGroupId as the identifier for
+            // tab groups. See https://crbug.com/387509285.
+            TabGroupModelFilter filter = mTabGroupModelFilterSupplier.get();
+            return filter.getGroupLastShownTabId(tabGroupId);
         }
     }
 }

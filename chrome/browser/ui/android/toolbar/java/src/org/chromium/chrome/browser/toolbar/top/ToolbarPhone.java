@@ -4,6 +4,8 @@
 
 package org.chromium.chrome.browser.toolbar.top;
 
+import static org.chromium.ui.accessibility.KeyboardFocusUtil.setFocusOnFirstFocusableDescendant;
+
 import android.animation.Animator;
 import android.animation.AnimatorSet;
 import android.animation.ObjectAnimator;
@@ -42,6 +44,7 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.appcompat.graphics.drawable.DrawableWrapperCompat;
+import androidx.core.content.ContextCompat;
 import androidx.core.content.res.ResourcesCompat;
 import androidx.core.widget.ImageViewCompat;
 
@@ -49,8 +52,6 @@ import org.chromium.base.Callback;
 import org.chromium.base.MathUtils;
 import org.chromium.base.TraceEvent;
 import org.chromium.base.supplier.ObservableSupplier;
-import org.chromium.base.supplier.Supplier;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.omnibox.LocationBar;
 import org.chromium.chrome.browser.omnibox.LocationBarCoordinator;
 import org.chromium.chrome.browser.omnibox.NewTabPageDelegate;
@@ -62,15 +63,14 @@ import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsDropdow
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.theme.ThemeUtils;
 import org.chromium.chrome.browser.toolbar.ButtonData;
-import org.chromium.chrome.browser.toolbar.KeyboardNavigationListener;
 import org.chromium.chrome.browser.toolbar.R;
 import org.chromium.chrome.browser.toolbar.ToolbarDataProvider;
-import org.chromium.chrome.browser.toolbar.ToolbarFeatures;
 import org.chromium.chrome.browser.toolbar.ToolbarProgressBar;
 import org.chromium.chrome.browser.toolbar.ToolbarTabController;
 import org.chromium.chrome.browser.toolbar.menu_button.MenuButtonCoordinator;
 import org.chromium.chrome.browser.toolbar.optional_button.OptionalButtonCoordinator;
 import org.chromium.chrome.browser.toolbar.optional_button.OptionalButtonCoordinator.TransitionType;
+import org.chromium.chrome.browser.toolbar.reload_button.ReloadButtonCoordinator;
 import org.chromium.chrome.browser.toolbar.top.CaptureReadinessResult.TopToolbarBlockCaptureReason;
 import org.chromium.chrome.browser.toolbar.top.TopToolbarCoordinator.ToolbarColorObserver;
 import org.chromium.chrome.browser.toolbar.top.TopToolbarCoordinator.UrlExpansionObserver;
@@ -78,8 +78,8 @@ import org.chromium.chrome.browser.ui.theme.BrandedColorScheme;
 import org.chromium.chrome.browser.user_education.UserEducationHelper;
 import org.chromium.components.browser_ui.styles.ChromeColors;
 import org.chromium.components.browser_ui.styles.SemanticColorUtils;
+import org.chromium.components.browser_ui.util.KeyboardNavigationListener;
 import org.chromium.components.browser_ui.widget.animation.CancelAwareAnimatorListener;
-import org.chromium.components.cached_flags.BooleanCachedFieldTrialParameter;
 import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.components.feature_engagement.EventConstants;
 import org.chromium.components.feature_engagement.Tracker;
@@ -118,18 +118,6 @@ public class ToolbarPhone extends ToolbarLayout
     protected static final int ENTERING_TAB_SWITCHER = 2;
     protected static final int EXITING_TAB_SWITCHER = 3;
 
-    // Finch params and default values for code cleanup.
-    private static final String PARAM_REMOVE_REDUNDANT_ANIM_CALL =
-            "remove_redundant_ntpupdate_in_lbvisualupdate";
-    private static final String PARAM_REMOVE_GTS_LAYOUT_LOCATION_BAR =
-            "remove_gts_layout_location_bar";
-    private static final boolean PARAM_REMOVE_GTS_LAYOUT_LOCATION_BAR_DEFAULT_VAL = true;
-    public static final BooleanCachedFieldTrialParameter REMOVE_REDUNDANT_ANIM_CALL =
-            ChromeFeatureList.newBooleanCachedFieldTrialParameter(
-                    ChromeFeatureList.TOOLBAR_PHONE_CLEANUP,
-                    PARAM_REMOVE_REDUNDANT_ANIM_CALL,
-                    true);
-
     @ViewDebug.ExportedProperty(
             category = "chrome",
             mapping = {
@@ -148,7 +136,7 @@ public class ToolbarPhone extends ToolbarLayout
 
     private ViewGroup mToolbarButtonsContainer;
     // Non-null after inflation occurs.
-    protected @NonNull ImageView mHomeButton;
+    private @NonNull ImageView mHomeButton;
     private TextView mUrlBar;
     protected View mUrlActionContainer;
     private OptionalButtonCoordinator mOptionalButtonCoordinator;
@@ -161,8 +149,6 @@ public class ToolbarPhone extends ToolbarLayout
     // a bitmap to use as a texture representation of this view.
     @ViewDebug.ExportedProperty(category = "chrome")
     protected boolean mTextureCaptureMode;
-
-    private boolean mForceTextureCapture;
 
     @ViewDebug.ExportedProperty(category = "chrome")
     protected boolean mUrlFocusChangeInProgress;
@@ -321,8 +307,7 @@ public class ToolbarPhone extends ToolbarLayout
         mBackgroundHeightIncreaseWhenFocus =
                 OmniboxResourceProvider.getToolbarOnFocusHeightIncrease(context);
         mToolbarBackgroundColorForNtp =
-                ChromeColors.getSurfaceColor(
-                        getContext(), R.dimen.home_surface_background_color_elevation);
+                ContextCompat.getColor(getContext(), R.color.home_surface_background_color);
         float LocationBarBackgroundColorAlphaForNtp =
                 ResourcesCompat.getFloat(
                         getResources(), R.dimen.home_surface_search_box_background_alpha);
@@ -354,9 +339,6 @@ public class ToolbarPhone extends ToolbarLayout
             setWillNotDraw(false);
             mUrlFocusTranslationX =
                     getResources().getDimensionPixelSize(R.dimen.toolbar_url_focus_translation_x);
-
-            // Set hover tooltip texts for toolbar buttons shared between phones and tablets.
-            super.setTooltipTextForToolbarButtons();
         }
     }
 
@@ -371,7 +353,8 @@ public class ToolbarPhone extends ToolbarLayout
             ToolbarTablet.OfflineDownloader offlineDownloader,
             UserEducationHelper userEducationHelper,
             ObservableSupplier<Tracker> trackerSupplier,
-            ToolbarProgressBar progressBar) {
+            ToolbarProgressBar progressBar,
+            ReloadButtonCoordinator reloadButtonCoordinator) {
         super.initialize(
                 toolbarDataProvider,
                 tabController,
@@ -382,7 +365,8 @@ public class ToolbarPhone extends ToolbarLayout
                 offlineDownloader,
                 userEducationHelper,
                 trackerSupplier,
-                progressBar);
+                progressBar,
+                reloadButtonCoordinator);
         mUserEducationHelper = userEducationHelper;
         mTrackerSupplier = trackerSupplier;
 
@@ -488,7 +472,8 @@ public class ToolbarPhone extends ToolbarLayout
                         : ChromeColors.getSurfaceColor(
                                 getContext(), R.dimen.toolbar_text_box_elevation);
             }
-            return mLocationBar.getDropdownBackgroundColor(isIncognitoBranded());
+            return OmniboxResourceProvider.getSuggestionsDropdownBackgroundColor(
+                    getContext(), mThemeColorProvider.getBrandedColorScheme());
         }
         return ChromeColors.getDefaultThemeColor(getContext(), isIncognitoBranded());
     }
@@ -507,7 +492,8 @@ public class ToolbarPhone extends ToolbarLayout
         if (mLocationBar.getPhoneCoordinator().hasFocus() || shouldUseFocusColor) {
 
             // Omnibox has same background as the Omnibox suggestion.
-            return mLocationBar.getSuggestionBackgroundColor(isIncognitoBranded());
+            return OmniboxResourceProvider.getStandardSuggestionBackgroundColor(
+                    getContext(), mThemeColorProvider.getBrandedColorScheme());
         }
         return getLocationBarColorForToolbarColor(toolbarColor);
     }
@@ -619,8 +605,8 @@ public class ToolbarPhone extends ToolbarLayout
             // updateUrlExpansionAnimation() is called for these states via
             // setTabSwitcherMode()/onTabSwitcherTransitionFinished() ->
             // updateVisualsForLocationBarState()
-            if (!REMOVE_REDUNDANT_ANIM_CALL.getValue() || !isInTabSwitcherMode()) {
-                updateUrlExpansionAnimation();
+            if (!isInTabSwitcherMode()) {
+                invokeTransition(false);
             }
             if (!changed) return;
         } else {
@@ -665,18 +651,6 @@ public class ToolbarPhone extends ToolbarLayout
     void setOptionalButtonCoordinatorForTesting(
             OptionalButtonCoordinator optionalButtonCoordinator) {
         mOptionalButtonCoordinator = optionalButtonCoordinator;
-    }
-
-    @SuppressLint("RtlHardcoded")
-    private boolean layoutLocationBar(int containerWidth) {
-        TraceEvent.begin("ToolbarPhone.layoutLocationBar");
-
-        boolean changed = layoutLocationBarWithoutAnimationExpansion(containerWidth);
-        if (changed) updateLocationBarLayoutForExpansionAnimation();
-
-        TraceEvent.end("ToolbarPhone.layoutLocationBar");
-
-        return changed;
     }
 
     @SuppressLint("RtlHardcoded")
@@ -909,7 +883,7 @@ public class ToolbarPhone extends ToolbarLayout
             updateLocationBarForNtp(mVisualState, urlHasFocus());
         }
         updateUrlExpansionFraction();
-        updateUrlExpansionAnimation();
+        invokeTransition(false);
     }
 
     /**
@@ -1020,7 +994,7 @@ public class ToolbarPhone extends ToolbarLayout
     private void setUrlFocusChangeFraction(float fraction) {
         mUrlFocusChangeFraction = fraction;
         updateUrlExpansionFraction();
-        updateUrlExpansionAnimation();
+        invokeTransition(false);
     }
 
     private void updateUrlExpansionFraction() {
@@ -1037,22 +1011,6 @@ public class ToolbarPhone extends ToolbarLayout
      * focus change or scrolling the New Tab Page.
      */
     private void updateUrlExpansionAnimation() {
-        // When exiting tab switcher, run / reset NTP animations based on if page is NTP.
-        Tab currentTab = getToolbarDataProvider().getTab();
-        if (REMOVE_REDUNDANT_ANIM_CALL.getValue()
-                && currentTab != null
-                && mTabSwitcherState == EXITING_TAB_SWITCHER) {
-            if (isLocationBarShownInNtp()) {
-                updateNtpTransitionAnimation();
-            } else {
-                // Reset these values in case we transitioned to a different page during the
-                // transition.
-                resetNtpAnimationValues();
-            }
-            // Return since we do not need to perform focus change animations here.
-            return;
-        }
-
         // TODO(crbug.com/40585866): Prevent url expansion signals from happening while the
         // toolbar is not visible (e.g. in tab switcher mode).
         if (isInTabSwitcherMode()) return;
@@ -1128,23 +1086,12 @@ public class ToolbarPhone extends ToolbarLayout
 
         locationBarBaseTranslationX *= 1f - mUrlExpansionFraction;
 
-        mLocationBarBackgroundNtpOffset.setEmpty();
-        mLocationBarNtpOffsetLeft = 0;
-        mLocationBarNtpOffsetRight = 0;
-
         boolean isLocationBarShownInNtp = isLocationBarShownInNtp();
         Tab currentTab = getToolbarDataProvider().getTab();
         if (currentTab != null) {
             getToolbarDataProvider()
                     .getNewTabPageDelegate()
                     .setUrlFocusChangeAnimationPercent(mUrlFocusChangeFraction);
-            if (isLocationBarShownInNtp) {
-                updateNtpTransitionAnimation();
-            } else {
-                // Reset these values in case we transitioned to a different page during the
-                // transition.
-                resetNtpAnimationValues();
-            }
         }
 
         float locationBarTranslationX;
@@ -1284,6 +1231,8 @@ public class ToolbarPhone extends ToolbarLayout
      */
     private void resetNtpAnimationValues() {
         mLocationBarBackgroundNtpOffset.setEmpty();
+        mLocationBarNtpOffsetLeft = 0;
+        mLocationBarNtpOffsetRight = 0;
         mActiveLocationBarBackground = mLocationBarBackground;
         mNtpSearchBoxTranslation.set(0, 0);
         mLocationBar.getPhoneCoordinator().setTranslationY(0);
@@ -1315,7 +1264,14 @@ public class ToolbarPhone extends ToolbarLayout
         if (mTabSwitcherState == TAB_SWITCHER || mTabSwitcherState == ENTERING_TAB_SWITCHER) return;
 
         boolean isExpanded = mUrlExpansionFraction > 0f;
-        setAncestorsShouldClipChildren(!isExpanded);
+        boolean isPartiallyExpanded = isExpanded && mUrlExpansionFraction < 1f;
+        // We only need to avoid getting clipped in the period where the fakebox drawable belongs to
+        // us but is taller than our bounds. It doesn't yet belong to us when the expansion fraction
+        // is 0 and by design matches our height when the expansion fraction is 1. Restoring
+        // clipChildren as soon as possible helps prevent visual glitches caused by views
+        // inadvertently drawing out of their bounds and on top of each other, e.g.
+        // crbug.com/396456418
+        setAncestorsShouldClipChildren(!isPartiallyExpanded);
         setClipToPadding(!isExpanded);
         if (!mUrlFocusChangeInProgress) {
             float alpha = 0.f;
@@ -1667,13 +1623,7 @@ public class ToolbarPhone extends ToolbarLayout
 
     @Override
     public CaptureReadinessResult isReadyForTextureCapture() {
-        if (mForceTextureCapture) {
-            return CaptureReadinessResult.readyForced();
-        } else if (ToolbarFeatures.shouldSuppressCaptures()) {
-            return getReadinessStateWithSuppression();
-        } else {
-            return CaptureReadinessResult.unknown(!(urlHasFocus() || mUrlFocusChangeInProgress));
-        }
+        return getReadinessStateWithSuppression();
     }
 
     private CaptureReadinessResult getReadinessStateWithSuppression() {
@@ -1708,46 +1658,15 @@ public class ToolbarPhone extends ToolbarLayout
         }
     }
 
-    @Override
-    public boolean setForceTextureCapture(boolean forceTextureCapture) {
-        if (forceTextureCapture) {
-            // Only force a texture capture if the tint for the toolbar drawables is changing or
-            // if the tab count has changed since the last texture capture.
-            if (mPhoneCaptureStateToken == null) {
-                mPhoneCaptureStateToken = generateToolbarSnapshotState();
-            }
-
-            mForceTextureCapture = mPhoneCaptureStateToken.getTint() != getTint().getDefaultColor();
-
-            if (getTabSwitcherButtonCoordinator() != null) {
-                mForceTextureCapture =
-                        mForceTextureCapture
-                                || mPhoneCaptureStateToken.getTabCount()
-                                        != getTabSwitcherButtonCoordinator().getDrawableTabCount();
-            }
-
-            return mForceTextureCapture;
-        }
-
-        mForceTextureCapture = false;
-        return false;
-    }
-
     private PhoneCaptureStateToken generateToolbarSnapshotState() {
-        UrlBarData urlBarData;
-        @DrawableRes int securityIconResource;
-        if (ToolbarFeatures.shouldSuppressCaptures()) {
-            urlBarData = mLocationBar.getUrlBarData();
-            if (urlBarData == null) urlBarData = getToolbarDataProvider().getUrlBarData();
-            StatusCoordinator statusCoordinator = mLocationBar.getStatusCoordinator();
-            securityIconResource =
-                    statusCoordinator == null
-                            ? getToolbarDataProvider().getSecurityIconResource(false)
-                            : statusCoordinator.getSecurityIconResource();
-        } else {
-            urlBarData = getToolbarDataProvider().getUrlBarData();
-            securityIconResource = getToolbarDataProvider().getSecurityIconResource(false);
-        }
+        UrlBarData urlBarData = mLocationBar.getUrlBarData();
+        if (urlBarData == null) urlBarData = getToolbarDataProvider().getUrlBarData();
+        StatusCoordinator statusCoordinator = mLocationBar.getStatusCoordinator();
+        @DrawableRes
+        int securityIconResource =
+                statusCoordinator == null
+                        ? getToolbarDataProvider().getSecurityIconResource(false)
+                        : statusCoordinator.getSecurityIconResource();
 
         VisibleUrlText visibleUrlText =
                 new VisibleUrlText(
@@ -1916,15 +1835,6 @@ public class ToolbarPhone extends ToolbarLayout
             if (mUrlFocusLayoutAnimator != null && mUrlFocusLayoutAnimator.isRunning()) {
                 mUrlFocusLayoutAnimator.end();
                 mUrlFocusLayoutAnimator = null;
-                if (!ChromeFeatureList.getFieldTrialParamByFeatureAsBoolean(
-                        ChromeFeatureList.TOOLBAR_PHONE_CLEANUP,
-                        PARAM_REMOVE_GTS_LAYOUT_LOCATION_BAR,
-                        PARAM_REMOVE_GTS_LAYOUT_LOCATION_BAR_DEFAULT_VAL)) {
-                    // After finishing the animation, force a re-layout of the location bar,
-                    // so that the final translation position is correct (since onMeasure updates
-                    // won't happen in tab switcher mode). crbug.com/518795.
-                    layoutLocationBar(getMeasuredWidth());
-                }
             }
             updateViewsForTabSwitcherMode();
         }
@@ -2188,7 +2098,7 @@ public class ToolbarPhone extends ToolbarLayout
                     }
                 });
         mUrlFocusLayoutAnimator.start();
-        if (!hasFocus) {
+        if (!hasFocus || mLocationBar.shouldShortCircuitFocusAnimation(true)) {
             TraceEvent.instant("ToolbarPhone.ShortCircuitUnfocusAnimation");
             mUrlFocusLayoutAnimator.end();
         }
@@ -2201,7 +2111,8 @@ public class ToolbarPhone extends ToolbarLayout
     public void onIncognitoStateChanged() {
         // Set the correct branded color scheme tinting for the {@link TabSwitcherDrawable} whenever
         // the incognito state changes.
-        setTabSwitcherDrawableColorScheme(isIncognitoBranded());
+        setTabSwitcherDrawableColorScheme();
+        updateRippleBackground();
     }
 
     @Override
@@ -2212,40 +2123,14 @@ public class ToolbarPhone extends ToolbarLayout
 
     private void onTabCountChanged(int numberOfTabs) {
         mHomeButton.setEnabled(true);
+        setTabSwitcherDrawableColorScheme();
+    }
+
+    private void setTabSwitcherDrawableColorScheme() {
         if (getTabSwitcherButtonCoordinator() != null) {
-            // In some use cases, isIncognitoBranded() will return a stale value for whether the
-            // current view is in incognito. The mismatched value will result in the retrieval of
-            // an incorrect branded color scheme (such as incognito when it is non-incognito). This
-            // leads to problems downstream when setting the tint for the TabSwitcherDrawable. Using
-            // the supplier incognito value from the button coordinator will get the correct value.
-            Supplier<Boolean> isIncognitoSupplier =
-                    getTabSwitcherButtonCoordinator().getIsIncognitoSupplier();
-            boolean isIncognito = isIncognitoBranded();
-            if (isIncognitoSupplier != null) {
-                isIncognito = isIncognitoSupplier.get();
-            }
-            setTabSwitcherDrawableColorScheme(isIncognito);
+            getTabSwitcherButtonCoordinator()
+                    .setBrandedColorScheme(mThemeColorProvider.getBrandedColorScheme());
         }
-    }
-
-    private void setTabSwitcherDrawableColorScheme(boolean isIncognito) {
-        @BrandedColorScheme
-        int overlayTabStackDrawableScheme =
-                OmniboxResourceProvider.getBrandedColorScheme(
-                        getContext(), isIncognito, getTabThemeColor());
-        getTabSwitcherButtonCoordinator().setBrandedColorScheme(overlayTabStackDrawableScheme);
-    }
-
-    /**
-     * Get the theme color for the currently active tab. This is not affected by the tab switcher's
-     * theme color.
-     *
-     * @return The current tab's theme color.
-     */
-    private @ColorInt int getTabThemeColor() {
-        if (getToolbarDataProvider() != null) return getToolbarDataProvider().getPrimaryColor();
-        return getToolbarColorForVisualState(
-                isIncognitoBranded() ? VisualState.INCOGNITO : VisualState.NORMAL);
     }
 
     @Override
@@ -2277,6 +2162,24 @@ public class ToolbarPhone extends ToolbarLayout
         super.onTabOrModelChanged();
         updateNtpAnimationState();
         updateVisualsForLocationBarState();
+    }
+
+    /** Called when the tab model changes. */
+    private void updateRippleBackground() {
+        var toolbarIconRippleId =
+                isIncognitoBranded()
+                        ? R.drawable.default_icon_background_baseline
+                        : R.drawable.default_icon_background;
+        var omniboxIconRippleId =
+                isIncognitoBranded()
+                        ? R.drawable.search_box_icon_background_baseline
+                        : R.drawable.search_box_icon_background;
+        mHomeButton.setBackgroundResource(toolbarIconRippleId);
+        getTabSwitcherButtonCoordinator()
+                .getContainerView()
+                .setBackgroundResource(toolbarIconRippleId);
+        getMenuButtonCoordinator().updateButtonBackground(toolbarIconRippleId);
+        mLocationBar.updateButtonBackground(omniboxIconRippleId);
     }
 
     private static boolean isVisualStateValidForBrandColorTransition(@VisualState int state) {
@@ -2349,7 +2252,7 @@ public class ToolbarPhone extends ToolbarLayout
         boolean wasShowingNtp = ntpDelegate.wasShowingNtp();
         float previousNtpScrollFraction = mNtpSearchBoxScrollFraction;
 
-        resetNtpAnimationValues();
+        invokeTransition(true);
         ntpDelegate.setSearchBoxScrollListener(this::onNtpScrollChanged);
         if (ntpDelegate.isLocationBarShown()) {
             updateToNtpBackground();
@@ -2575,7 +2478,7 @@ public class ToolbarPhone extends ToolbarLayout
             mLayoutUpdater.run();
         }
         updateShadowVisibility();
-        updateUrlExpansionAnimation();
+        invokeTransition(false);
 
         // This exception is to prevent early change of theme color when exiting the tab switcher
         // since currently visual state does not map correctly to tab switcher state. See
@@ -2585,13 +2488,6 @@ public class ToolbarPhone extends ToolbarLayout
         }
 
         if (!visualStateChanged) {
-            if (!REMOVE_REDUNDANT_ANIM_CALL.getValue()) {
-                if (mVisualState == VisualState.NEW_TAB_NORMAL) {
-                    updateNtpTransitionAnimation();
-                } else {
-                    resetNtpAnimationValues();
-                }
-            }
             TraceEvent.end("ToolbarPhone.updateVisualsForLocationBarState");
             return;
         }
@@ -2607,16 +2503,6 @@ public class ToolbarPhone extends ToolbarLayout
         updateModernLocationBarColor(getLocationBarColorForToolbarColor(currentPrimaryColor));
 
         mLocationBar.updateVisualsForState();
-        if (!REMOVE_REDUNDANT_ANIM_CALL.getValue()) {
-            // These are used to skip setting state unnecessarily while in the tab switcher.
-            boolean inOrEnteringStaticTab =
-                    mTabSwitcherState == STATIC_TAB || mTabSwitcherState == EXITING_TAB_SWITCHER;
-            // We update the alpha before comparing the visual state as we need to change
-            // its value when entering and exiting TabSwitcher mode.
-            if (isLocationBarShownInNtp() && inOrEnteringStaticTab) {
-                updateNtpTransitionAnimation();
-            }
-        }
 
         getMenuButtonCoordinator().setVisibility(true);
         TraceEvent.end("ToolbarPhone.updateVisualsForLocationBarState");
@@ -2679,7 +2565,7 @@ public class ToolbarPhone extends ToolbarLayout
             mOptionalButtonCoordinator =
                     new OptionalButtonCoordinator(
                             optionalButton,
-                            mUserEducationHelper,
+                            () -> mUserEducationHelper,
                             /* transitionRoot= */ mToolbarButtonsContainer,
                             isAnimationAllowedPredicate,
                             mTrackerSupplier);
@@ -2733,14 +2619,14 @@ public class ToolbarPhone extends ToolbarLayout
     }
 
     @Override
-    void updateOptionalButton(ButtonData buttonData) {
+    protected void updateOptionalButton(ButtonData buttonData) {
         mButtonData = buttonData;
 
         if (mOptionalButtonCoordinator == null) {
             initializeOptionalButton();
         }
 
-        mOptionalButtonCoordinator.updateButton(buttonData);
+        mOptionalButtonCoordinator.updateButton(buttonData, isIncognitoBranded());
     }
 
     @Override
@@ -2953,6 +2839,13 @@ public class ToolbarPhone extends ToolbarLayout
         updateToolbarBackgroundFromState(mVisualState);
     }
 
+    @Override
+    public void requestKeyboardFocus() {
+        setFocusOnFirstFocusableDescendant(this);
+        // TODO(crbug.com/360423850): Replace this setFocus(mLocationBar) when omnibox keyboard
+        // behavior is fixed.
+    }
+
     /**
      * @return The height of the background drawable for the location bar.
      */
@@ -2963,5 +2856,37 @@ public class ToolbarPhone extends ToolbarLayout
 
     void setNtpSearchBoxScrollFractionForTesting(float ntpSearchBoxScrollFraction) {
         mNtpSearchBoxScrollFraction = ntpSearchBoxScrollFraction;
+    }
+
+    /**
+     * Triggers NTP transition animation (if toolbar is shown on NTP) and URL expansion animation.
+     *
+     * @param resetNtpTransition if the transition is to reset NTP animation.
+     */
+    private void invokeTransition(boolean resetNtpTransition) {
+        if (resetNtpTransition) {
+            resetNtpAnimationValues();
+            return;
+        }
+
+        // No-op when entering or in tab switcher.
+        if (inOrEnteringTabSwitcher()) {
+            return;
+        }
+
+        /*
+         * Invoke NTP translation before URL expansion - NTP animation determines offsets for
+         * locationBar and urlAction X-translations during URL expansion.
+         */
+        if (isLocationBarShownInNtp()) {
+            updateNtpTransitionAnimation();
+        } else {
+            resetNtpAnimationValues();
+        }
+        updateUrlExpansionAnimation();
+    }
+
+    private boolean inOrEnteringTabSwitcher() {
+        return mTabSwitcherState == TAB_SWITCHER || mTabSwitcherState == ENTERING_TAB_SWITCHER;
     }
 }

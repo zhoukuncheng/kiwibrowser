@@ -5,19 +5,20 @@
 package org.chromium.chrome.browser.tasks.tab_management;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.res.Resources;
 
-import androidx.annotation.DimenRes;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.chromium.base.Token;
 import org.chromium.base.supplier.Supplier;
+import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.tab_ui.R;
 import org.chromium.components.browser_ui.widget.BrowserUiListMenuUtils;
-import org.chromium.components.data_sharing.DataSharingService;
-import org.chromium.components.data_sharing.DataSharingService.GroupDataOrFailureOutcome;
+import org.chromium.components.collaboration.CollaborationService;
 import org.chromium.components.data_sharing.member_role.MemberRole;
-import org.chromium.components.signin.identitymanager.IdentityManager;
 import org.chromium.components.tab_group_sync.TabGroupSyncService;
 import org.chromium.ui.modelutil.MVCListAdapter.ModelList;
 
@@ -27,27 +28,24 @@ import org.chromium.ui.modelutil.MVCListAdapter.ModelList;
  */
 public class TabListGroupMenuCoordinator extends TabGroupOverflowMenuCoordinator {
     /**
+     * @param onItemClicked A callback for listening to clicks.
      * @param tabModelSupplier The supplier of the tab model.
-     * @param isTabGroupSyncEnabled Whether to show the delete group option.
-     * @param identityManager Used for checking the current account.
      * @param tabGroupSyncService Used to checking if a group is shared or synced.
-     * @param dataSharingService Used for checking the user is the owner of a group.
+     * @param context The {@link Context} that the coordinator resides in.
      */
     public TabListGroupMenuCoordinator(
-            OnItemClickedCallback onItemClicked,
+            OnItemClickedCallback<Token> onItemClicked,
             Supplier<TabModel> tabModelSupplier,
-            boolean isTabGroupSyncEnabled,
-            @Nullable IdentityManager identityManager,
             @Nullable TabGroupSyncService tabGroupSyncService,
-            @Nullable DataSharingService dataSharingService) {
+            @NonNull CollaborationService collaborationService,
+            @NonNull Context context) {
         super(
                 R.layout.tab_switcher_action_menu_layout,
                 onItemClicked,
                 tabModelSupplier,
-                isTabGroupSyncEnabled,
-                identityManager,
                 tabGroupSyncService,
-                dataSharingService);
+                collaborationService,
+                context);
     }
 
     /**
@@ -56,16 +54,26 @@ public class TabListGroupMenuCoordinator extends TabGroupOverflowMenuCoordinator
      */
     TabListMediator.TabActionListener getTabActionListener() {
         return (view, tabId) -> {
-            createAndShowMenu(view, tabId, (Activity) view.getContext());
+            @Nullable TabModel tabModel = getTabModel();
+            if (tabModel == null) return;
+
+            @Nullable Tab tab = tabModel.getTabById(tabId);
+            if (tab == null) return;
+
+            @Nullable Token tabGroupId = tab.getTabGroupId();
+            if (tabGroupId == null) return;
+
+            createAndShowMenu(view, tabGroupId, (Activity) view.getContext());
         };
     }
 
     @Override
-    protected void buildMenuActionItems(
-            ModelList itemList,
-            boolean isIncognito,
-            boolean isTabGroupSyncEnabled,
-            boolean hasCollaborationData) {
+    protected void buildMenuActionItems(ModelList itemList, Token tabGroupId) {
+        boolean isIncognito = mTabModelSupplier.get().isIncognitoBranded();
+        @Nullable String collaborationId = getCollaborationIdOrNull(tabGroupId);
+        boolean hasCollaborationData =
+                TabShareUtils.isCollaborationIdValid(collaborationId)
+                        && mCollaborationService.getServiceStatus().isAllowedToJoin();
         itemList.add(
                 BrowserUiListMenuUtils.buildMenuListItemWithIncognitoBranding(
                         R.string.close_tab_group_menu_item,
@@ -94,9 +102,20 @@ public class TabListGroupMenuCoordinator extends TabGroupOverflowMenuCoordinator
                             R.style.TextAppearance_TextLarge_Primary_Baseline_Light,
                             isIncognito,
                             true));
+            if (!isIncognito && mCollaborationService.getServiceStatus().isAllowedToCreate()) {
+                itemList.add(
+                        BrowserUiListMenuUtils.buildMenuListItemWithIncognitoBranding(
+                                R.string.share_tab_group_menu_item,
+                                R.id.share_group,
+                                /* startIconId= */ Resources.ID_NULL,
+                                /* iconTintColorStateList= */ Resources.ID_NULL,
+                                R.style.TextAppearance_TextLarge_Primary_Baseline_Light,
+                                isIncognito,
+                                true));
+            }
         }
         // Delete does not make sense for incognito since the tab group is not saved to sync.
-        if (isTabGroupSyncEnabled && !isIncognito && !hasCollaborationData) {
+        if (mTabGroupSyncService != null && !isIncognito && !hasCollaborationData) {
             itemList.add(
                     BrowserUiListMenuUtils.buildMenuListItemWithIncognitoBranding(
                             R.string.delete_tab_group_menu_item,
@@ -110,11 +129,7 @@ public class TabListGroupMenuCoordinator extends TabGroupOverflowMenuCoordinator
     }
 
     @Override
-    public void buildCollaborationMenuItems(
-            ModelList itemList,
-            IdentityManager identityManager,
-            GroupDataOrFailureOutcome outcome) {
-        @MemberRole int memberRole = TabShareUtils.getSelfMemberRole(outcome, identityManager);
+    public void buildCollaborationMenuItems(ModelList itemList, @MemberRole int memberRole) {
         if (memberRole == MemberRole.OWNER) {
             itemList.add(
                     BrowserUiListMenuUtils.buildMenuListItemWithIncognitoBranding(
@@ -139,7 +154,7 @@ public class TabListGroupMenuCoordinator extends TabGroupOverflowMenuCoordinator
     }
 
     @Override
-    protected @DimenRes int getMenuWidth() {
-        return R.dimen.tab_group_menu_width;
+    protected int getMenuWidth(int anchorViewWidthPx) {
+        return getDimensionPixelSize(R.dimen.tab_group_menu_width);
     }
 }

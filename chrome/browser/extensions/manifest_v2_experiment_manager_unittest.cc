@@ -17,6 +17,7 @@
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 #include "extensions/browser/disable_reason.h"
 #include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/pref_names.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/extension_features.h"
@@ -208,8 +209,8 @@ TEST_F(ManifestV2ExperimentManagerWarningUnitTest,
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
 
-  service()->AddExtension(ext1.get());
-  service()->AddExtension(ext2.get());
+  registrar()->AddExtension(ext1.get());
+  registrar()->AddExtension(ext2.get());
 
   EXPECT_FALSE(experiment_manager()->DidUserAcknowledgeNotice(ext1->id()));
   EXPECT_FALSE(experiment_manager()->DidUserAcknowledgeNotice(ext2->id()));
@@ -441,8 +442,8 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableUnitTest,
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
 
-  service()->AddExtension(ext1.get());
-  service()->AddExtension(ext2.get());
+  registrar()->AddExtension(ext1.get());
+  registrar()->AddExtension(ext2.get());
 
   EXPECT_FALSE(experiment_manager()->DidUserAcknowledgeNotice(ext1->id()));
   EXPECT_FALSE(experiment_manager()->DidUserAcknowledgeNotice(ext2->id()));
@@ -502,7 +503,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableUnitTest,
             .SetManifestVersion(2)
             .SetLocation(test_case.manifest_location)
             .Build();
-    service()->AddExtension(extension.get());
+    registrar()->AddExtension(extension.get());
 
     experiment_manager()->DisableAffectedExtensionsForTesting();
     experiment_manager()->EmitMetricsForProfileReadyForTesting();
@@ -535,7 +536,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableUnitTest,
           .SetManifestVersion(3)
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension.get());
 
   experiment_manager()->DisableAffectedExtensionsForTesting();
   experiment_manager()->EmitMetricsForProfileReadyForTesting();
@@ -555,7 +556,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableUnitTest,
           .SetManifestVersion(2)
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension.get());
 
   experiment_manager()->DisableAffectedExtensionsForTesting();
   service()->EnableExtension(extension->id());
@@ -579,7 +580,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableUnitTest,
           .SetManifestVersion(2)
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension.get());
 
   experiment_manager()->DisableAffectedExtensionsForTesting();
   service()->EnableExtension(extension->id());
@@ -772,7 +773,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableAndPolicyUnitTest,
   // extensions.
   scoped_refptr<const Extension> extension =
       ExtensionBuilder("test extension").SetManifestVersion(2).Build();
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension.get());
   const ExtensionId extension_id = extension->id();
 
   experiment_manager()->DisableAffectedExtensionsForTesting();
@@ -781,23 +782,23 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableAndPolicyUnitTest,
   ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(profile());
 
   EXPECT_TRUE(registry()->disabled_extensions().Contains(extension_id));
-  EXPECT_EQ(
-      static_cast<int>(disable_reason::DISABLE_UNSUPPORTED_MANIFEST_VERSION),
-      extension_prefs->GetDisableReasons(extension_id));
+  EXPECT_THAT(extension_prefs->GetDisableReasons(extension_id),
+              testing::UnorderedElementsAre(
+                  disable_reason::DISABLE_UNSUPPORTED_MANIFEST_VERSION));
 
   // Set the MV2 policy to allow all MV2 extensions.
   SetMV2PolicyLevel(MV2PolicyLevel::kAllowed);
 
   // The extension should be enabled, since it's now allowed.
   EXPECT_TRUE(registry()->enabled_extensions().Contains(extension_id));
-  EXPECT_EQ(0, extension_prefs->GetDisableReasons(extension_id));
+  EXPECT_TRUE(extension_prefs->GetDisableReasons(extension_id).empty());
 
   // Clear the MV2 policy. The extension should now be disabled again.
   ClearMV2Policy();
   EXPECT_TRUE(registry()->disabled_extensions().Contains(extension_id));
-  EXPECT_EQ(
-      static_cast<int>(disable_reason::DISABLE_UNSUPPORTED_MANIFEST_VERSION),
-      extension_prefs->GetDisableReasons(extension_id));
+  EXPECT_THAT(extension_prefs->GetDisableReasons(extension_id),
+              testing::UnorderedElementsAre(
+                  disable_reason::DISABLE_UNSUPPORTED_MANIFEST_VERSION));
 }
 
 // Tests that MV2 extensions that are allowed by policy emit `kUnaffected` for
@@ -813,7 +814,7 @@ TEST_F(ManifestV2ExperimentManagerDisableWithReEnableAndPolicyUnitTest,
           .SetManifestVersion(2)
           .SetLocation(mojom::ManifestLocation::kInternal)
           .Build();
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension.get());
 
   experiment_manager()->DisableAffectedExtensionsForTesting();
   experiment_manager()->EmitMetricsForProfileReadyForTesting();

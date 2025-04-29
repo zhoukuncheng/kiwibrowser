@@ -12,12 +12,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import static org.chromium.chrome.browser.tasks.tab_management.TabSwitcherPaneDrawableProperties.SHOW_NOTIFICATION_DOT;
 import static org.chromium.chrome.browser.tasks.tab_management.TabSwitcherPaneDrawableProperties.TAB_COUNT;
 
 import android.content.Context;
 
 import androidx.test.core.app.ApplicationProvider;
-import androidx.test.filters.SmallTest;
 
 import org.junit.After;
 import org.junit.Before;
@@ -50,6 +50,8 @@ public class TabSwitcherPaneDrawableMediatorUnitTest {
 
     private final ObservableSupplierImpl<Integer> mTabCountSupplier =
             new ObservableSupplierImpl<>();
+    private final ObservableSupplierImpl<Boolean> mNotificationDotSupplier =
+            new ObservableSupplierImpl<>(false);
 
     private Context mContext;
     private PropertyModel mModel;
@@ -72,29 +74,37 @@ public class TabSwitcherPaneDrawableMediatorUnitTest {
     }
 
     @Test
-    @SmallTest
     public void testMediatorEarlyTabModelSelectorInit() {
         when(mTabModelSelector.isTabStateInitialized()).thenReturn(true);
-        var mediator = new TabSwitcherPaneDrawableMediator(mTabModelSelector, mModel);
+        var mediator =
+                new TabSwitcherPaneDrawableMediator(
+                        mTabModelSelector, mNotificationDotSupplier, mModel);
         verify(mTabModelSelector, never()).addObserver(any());
 
         assertTrue(mTabCountSupplier.hasObservers());
+        assertTrue(mNotificationDotSupplier.hasObservers());
 
         ShadowLooper.runUiThreadTasks();
 
         assertEquals(mTabCountSupplier.get().intValue(), mModel.get(TAB_COUNT));
+        assertFalse(mModel.get(SHOW_NOTIFICATION_DOT));
 
         mTabCountSupplier.set(50);
         assertEquals(mTabCountSupplier.get().intValue(), mModel.get(TAB_COUNT));
+        assertFalse(mModel.get(SHOW_NOTIFICATION_DOT));
+
+        mNotificationDotSupplier.set(true);
+        assertTrue(mModel.get(SHOW_NOTIFICATION_DOT));
 
         mediator.destroy();
     }
 
     @Test
-    @SmallTest
     public void testMediatorLateTabModelSelectorInit() {
         when(mTabModelSelector.isTabStateInitialized()).thenReturn(false);
-        var mediator = new TabSwitcherPaneDrawableMediator(mTabModelSelector, mModel);
+        var mediator =
+                new TabSwitcherPaneDrawableMediator(
+                        mTabModelSelector, mNotificationDotSupplier, mModel);
         verify(mTabModelSelector).addObserver(mTabModelSelectorObserverCaptor.capture());
 
         mTabModelSelectorObserverCaptor.getValue().onTabStateInitialized();
@@ -112,10 +122,11 @@ public class TabSwitcherPaneDrawableMediatorUnitTest {
     }
 
     @Test
-    @SmallTest
     public void testDestroyBeforeInitAvoidsLeak() {
         when(mTabModelSelector.isTabStateInitialized()).thenReturn(false);
-        var mediator = new TabSwitcherPaneDrawableMediator(mTabModelSelector, mModel);
+        var mediator =
+                new TabSwitcherPaneDrawableMediator(
+                        mTabModelSelector, mNotificationDotSupplier, mModel);
         verify(mTabModelSelector).addObserver(mTabModelSelectorObserverCaptor.capture());
 
         mediator.destroy();

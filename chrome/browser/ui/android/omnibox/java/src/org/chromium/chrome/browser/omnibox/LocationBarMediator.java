@@ -21,6 +21,7 @@ import android.view.View.MeasureSpec;
 import android.view.View.OnKeyListener;
 import android.widget.TextView;
 
+import androidx.annotation.DrawableRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
@@ -29,6 +30,7 @@ import androidx.appcompat.content.res.AppCompatResources;
 import org.chromium.base.CallbackController;
 import org.chromium.base.CommandLine;
 import org.chromium.base.ObserverList;
+import org.chromium.base.TraceEvent;
 import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.metrics.RecordUserAction;
 import org.chromium.base.metrics.TimingMetric;
@@ -37,6 +39,8 @@ import org.chromium.base.supplier.ObservableSupplierImpl;
 import org.chromium.base.supplier.OneshotSupplier;
 import org.chromium.base.task.PostTask;
 import org.chromium.base.task.TaskTraits;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider.ControlsPosition;
 import org.chromium.chrome.browser.device.DeviceClassManager;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
@@ -163,6 +167,7 @@ class LocationBarMediator
     private final LocationBarLayout mLocationBarLayout;
     private VoiceRecognitionHandler mVoiceRecognitionHandler;
     private final LocationBarDataProvider mLocationBarDataProvider;
+    private final @Nullable BrowserControlsStateProvider mBrowserControlsStateProvider;
     private final LocationBarEmbedderUiOverrides mEmbedderUiOverrides;
     private StatusCoordinator mStatusCoordinator;
     private AutocompleteCoordinator mAutocompleteCoordinator;
@@ -226,7 +231,8 @@ class LocationBarMediator
             @NonNull OmniboxUma omniboxUma,
             @NonNull BooleanSupplier isToolbarMicEnabledSupplier,
             @NonNull OmniboxSuggestionsDropdownEmbedderImpl dropdownEmbedder,
-            @Nullable ObservableSupplier<TabModelSelector> tabModelSelectorSupplier) {
+            @Nullable ObservableSupplier<TabModelSelector> tabModelSelectorSupplier,
+            @Nullable BrowserControlsStateProvider browserControlsStateProvider) {
         mContext = context;
         mLocationBarLayout = locationBarLayout;
         mLocationBarDataProvider = locationBarDataProvider;
@@ -249,6 +255,7 @@ class LocationBarMediator
         mIsToolbarMicEnabledSupplier = isToolbarMicEnabledSupplier;
         mEmbedderImpl = dropdownEmbedder;
         mTabModelSelectorSupplier = tabModelSelectorSupplier;
+        mBrowserControlsStateProvider = browserControlsStateProvider;
     }
 
     /**
@@ -298,7 +305,9 @@ class LocationBarMediator
         if (hasFocus) {
             if (mNativeInitialized) RecordUserAction.record("FocusLocation");
             boolean shouldRetainOmniboxOnFocus = OmniboxFeatures.shouldRetainOmniboxOnFocus();
-            if (!mUrlFocusedWithPastedText && !shouldRetainOmniboxOnFocus) {
+            if (!mUrlFocusedWithPastedText
+                    && !shouldRetainOmniboxOnFocus
+                    && mLocationBarLayout.shouldClearTextOnFocus()) {
                 setUrlBarText(
                         UrlBarData.EMPTY, UrlBar.ScrollType.NO_SCROLL, SelectionState.SELECT_END);
             } else if (shouldRetainOmniboxOnFocus) {
@@ -631,7 +640,13 @@ class LocationBarMediator
         mLocaleManager.recordLocaleBasedSearchMetrics(
                 false, url, omniboxLoadUrlParams.transitionType);
 
-        PostTask.postTask(TaskTraits.UI_USER_VISIBLE, () -> focusCurrentTab());
+        // Without the following postDelayedTask, focusCurrentTab runs on the critical path of
+        // navigation. The following code postpone running focusCurrentTab and prioritize
+        // running navigation code.
+        PostTask.postDelayedTask(
+                TaskTraits.UI_USER_VISIBLE,
+                this::focusCurrentTab,
+                OmniboxFeatures.sPostDelayedTaskFocusTabTimeMillis.getValue());
     }
 
     /* package */ boolean didFocusUrlFromFakebox() {
@@ -671,6 +686,7 @@ class LocationBarMediator
         RecordUserAction.record("MobileOmniboxDeleteUrl");
         setUrlBarTextEmpty();
         updateButtonVisibility();
+        mUrlCoordinator.requestAccessibilityFocus();
     }
 
     /* package */ void micButtonClicked(View view) {
@@ -1060,10 +1076,12 @@ class LocationBarMediator
     }
 
     private void focusCurrentTab() {
-        assert mLocationBarDataProvider != null;
-        if (mLocationBarDataProvider.hasTab()) {
-            View view = mLocationBarDataProvider.getTab().getView();
-            if (view != null) view.requestFocus();
+        try (TraceEvent traceEvent = TraceEvent.scoped("LocationBarMediator.focusCurrentTab")) {
+            assert mLocationBarDataProvider != null;
+            if (mLocationBarDataProvider.hasTab()) {
+                View view = mLocationBarDataProvider.getTab().getView();
+                if (view != null) view.requestFocus();
+            }
         }
     }
 
@@ -1104,8 +1122,15 @@ class LocationBarMediator
     }
 
     private void updateShouldAnimateIconChanges() {
+        boolean isToolbarTopAnchored =
+                mBrowserControlsStateProvider != null
+                        && mBrowserControlsStateProvider.getControlsPosition()
+                                == ControlsPosition.TOP;
         boolean shouldAnimate =
-                mIsTablet ? isUrlBarFocused() : isUrlBarFocused() || mIsUrlFocusChangeInProgress;
+                mIsTablet
+                        ? isUrlBarFocused()
+                        : isToolbarTopAnchored
+                                && (isUrlBarFocused() || mIsUrlFocusChangeInProgress);
         mStatusCoordinator.setShouldAnimateIconChanges(shouldAnimate);
     }
 
@@ -1367,14 +1392,15 @@ class LocationBarMediator
                     UrlBar.ScrollType.NO_SCROLL,
                     UrlBarCoordinator.SelectionState.SELECT_END);
             /*
-             When the URL bar text is programmatically set on omnibox state restoration during a
-             device fold transition, {@code AutocompleteEditText#getTextWithoutAutocomplete()}
-             invoked by {@code #forceOnTextChanged()} returns an empty string because {@code
-             AutocompleteEditText#mModel} is not initialized. To trigger the autocomplete system in
-             this case, {@code AutocompleteCoordinator#onTextChanged()} will be directly called on
-             the restored omnibox text input.
+             When the URL bar text is programmatically set on omnibox state restoration, for e.g.
+             during a device fold transition,
+             {@code AutocompleteEditText#getTextWithoutAutocomplete()} invoked by
+             {@code #forceOnTextChanged()} returns an empty string because
+             {@code AutocompleteEditText#mModel} is not initialized. To trigger the autocomplete
+             system in this case, {@code AutocompleteCoordinator#onTextChanged()} will be directly
+             called on the restored omnibox text input.
             */
-            if (reason == OmniboxFocusReason.FOLD_TRANSITION_RESTORATION) {
+            if (reason == OmniboxFocusReason.ACTIVITY_RECREATION_RESTORATION) {
                 mAutocompleteCoordinator.onTextChanged(pastedText);
             } else {
                 forceOnTextChanged();
@@ -1653,6 +1679,15 @@ class LocationBarMediator
      */
     public void updateUrlActionContainerEndMargin(boolean useDefaultUrlActionContainerEndMargin) {
         mLocationBarLayout.updateUrlActionContainerEndMargin(useDefaultUrlActionContainerEndMargin);
+    }
+
+    /**
+     * Updates the location bar button background.
+     *
+     * @param backgroundResId The button background resource.
+     */
+    public void updateButtonBackground(@DrawableRes int backgroundResId) {
+        mLocationBarLayout.setDeleteButtonBackground(backgroundResId);
     }
 
     public void maybeShowDefaultBrowserPromo() {

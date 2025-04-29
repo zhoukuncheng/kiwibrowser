@@ -32,6 +32,7 @@ include_rules = [
   "+components/browsing_data/content/android/java",
   "+components/cached_flags/android",
   "+components/commerce/core",
+  "+components/input",
   "+components/content_capture",
   "+components/content_settings",
   "+components/browser_ui/desktop_windowing/android",
@@ -57,6 +58,7 @@ include_rules = [
   "+components/privacy_sandbox/android",
   "+components/query_tiles",
   "+components/safe_browsing/android/java",
+  "+components/saved_tab_groups/public/android/java",
   "+components/security_interstitials/content/android",
   "+components/signin/public/android",
   "+components/site_engagement/content/android",
@@ -75,6 +77,7 @@ include_rules = [
   "+media/base/android/java",
   "+services/device/public",
   "+services/media_session/public",
+  "+ui/android",
 ]
 
 specific_include_rules = {

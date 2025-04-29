@@ -8,7 +8,7 @@
 #include "base/numerics/safe_conversions.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "cc/input/browser_controls_offset_tags_info.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "services/network/public/cpp/url_loader_completion_status.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
@@ -570,6 +570,11 @@ void LocalFrameMojoHandler::NotifyVirtualKeyboardOverlayRect(
   frame_->NotifyVirtualKeyboardOverlayRectObservers(scaled_rect);
 }
 
+void LocalFrameMojoHandler::NotifyContextMenuInsetsObservers(
+    const gfx::Rect& safe_area) {
+  frame_->NotifyContextMenuInsetsObservers(safe_area);
+}
+
 void LocalFrameMojoHandler::AddMessageToConsole(
     mojom::blink::ConsoleMessageLevel level,
     const WTF::String& message,
@@ -908,9 +913,9 @@ void LocalFrameMojoHandler::JavaScriptExecuteRequestForTests(
       if (resolve_promises && !value.IsEmpty() && value->IsPromise()) {
         auto promise = ScriptPromise<IDLAny>::FromV8Promise(
             script_state->GetIsolate(), value.As<v8::Promise>());
-        promise.React(script_state,
-                      handler->CreateResolveCallback(script_state, frame_),
-                      handler->CreateRejectCallback(script_state, frame_));
+        promise.Then(script_state,
+                     handler->CreateResolveCallback(script_state, frame_),
+                     handler->CreateRejectCallback(script_state, frame_));
       } else {
         handler->SendSuccess(script_state, value);
       }
@@ -1313,7 +1318,8 @@ void LocalFrameMojoHandler::UpdateBrowserControlsState(
     cc::BrowserControlsState constraints,
     cc::BrowserControlsState current,
     bool animate,
-    const std::optional<cc::BrowserControlsOffsetTagsInfo>& offset_tags_info) {
+    const std::optional<cc::BrowserControlsOffsetTagModifications>&
+        offset_tag_modifications) {
   DCHECK(frame_->IsOutermostMainFrame());
   TRACE_EVENT2("renderer", "LocalFrame::UpdateBrowserControlsState",
                "Constraint", static_cast<int>(constraints), "Current",
@@ -1322,7 +1328,7 @@ void LocalFrameMojoHandler::UpdateBrowserControlsState(
                        "animated", animate);
 
   frame_->GetWidgetForLocalRoot()->UpdateBrowserControlsState(
-      constraints, current, animate, offset_tags_info);
+      constraints, current, animate, offset_tag_modifications);
 }
 
 void LocalFrameMojoHandler::Discard() {
@@ -1346,13 +1352,12 @@ void LocalFrameMojoHandler::SetV8CompileHints(
   if (!mapping.IsValid()) {
     return;
   }
-  const int64_t* memory = mapping.GetMemoryAs<int64_t>();
-  if (memory == nullptr) {
+  base::span<const int64_t> memory = mapping.GetMemoryAsSpan<int64_t>();
+  if (memory.empty()) {
     return;
   }
 
-  page->GetV8CrowdsourcedCompileHintsConsumer().SetData(memory,
-                                                        mapping.size() / 8);
+  page->GetV8CrowdsourcedCompileHintsConsumer().SetData(memory);
 }
 
 void LocalFrameMojoHandler::SnapshotDocumentForViewTransition(
@@ -1422,6 +1427,12 @@ void LocalFrameMojoHandler::AddResourceTimingEntryForFailedSubframeNavigation(
   info->is_secure_transport = is_secure_transport;
   info->timing = std::move(load_timing_info);
   subframe->Owner()->AddResourceTiming(std::move(info));
+}
+
+void LocalFrameMojoHandler::GetScrollPosition(
+    GetScrollPositionCallback callback) {
+  std::move(callback).Run(gfx::ToFlooredPoint(
+      frame_->LocalFrameRoot().View()->LayoutViewport()->ScrollPosition()));
 }
 
 void LocalFrameMojoHandler::RequestFullscreenVideoElement() {

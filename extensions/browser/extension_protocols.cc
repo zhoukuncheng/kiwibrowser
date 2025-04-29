@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "extensions/browser/extension_protocols.h"
 
 #include <stddef.h>
@@ -21,6 +16,7 @@
 
 #include "base/base64.h"
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -105,7 +101,6 @@
 #include "services/network/public/mojom/early_hints.mojom.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
-#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/resource_type_util.h"
 #include "url/origin.h"
 #include "url/url_util.h"
@@ -124,6 +119,10 @@ using extensions::SharedModuleInfo;
 
 namespace extensions {
 namespace {
+
+BASE_FEATURE(kOverrideExtensionFilesMimeTypes,
+             "OverrideExtensionFilesMimeTypes",
+             base::FEATURE_ENABLED_BY_DEFAULT);
 
 ExtensionProtocolTestHandler* g_test_handler = nullptr;
 
@@ -201,15 +200,6 @@ bool AllowExtensionResourceLoad(const network::ResourceRequest& request,
     return false;
   }
 
-  // Prevent unexpected use of a dynamic url request. `chrome.runtime.getURL()`
-  // returns a dynamic url when using the extension feature and when
-  // `use_dynamic_url` is true for the resource.
-  if (extension && extension->guid() == request.url.host() &&
-      !base::FeatureList::IsEnabled(
-          extensions_features::kExtensionDynamicURLRedirection)) {
-    return false;
-  }
-
   // The following checks are meant to replicate similar set of checks in the
   // renderer process, performed by ResourceRequestPolicy::CanRequestResource.
   // These are not exactly equivalent, because we don't have the same bits of
@@ -229,14 +219,13 @@ bool AllowExtensionResourceLoad(const network::ResourceRequest& request,
 
   // Frame navigations to extensions have already been checked in
   // the ExtensionNavigationThrottle.
-  // Dedicated Worker (with PlzDedicatedWorker) and Shared Worker main scripts
-  // can be loaded with extension URLs in browser process.
-  // Service Worker and the imported scripts can be loaded with extension URLs
-  // in browser process when PlzServiceWorker is enabled or during update check.
+  // Dedicated Worker and Shared Worker main scripts can be loaded with
+  // extension URLs in browser process. Service Worker and the imported scripts
+  // can be loaded with extension URLs in browser process when PlzServiceWorker
+  // is enabled or during update check.
   if (child_id == content::ChildProcessHost::kInvalidUniqueID &&
       (blink::IsRequestDestinationFrame(destination) ||
-       (base::FeatureList::IsEnabled(blink::features::kPlzDedicatedWorker) &&
-        destination == network::mojom::RequestDestination::kWorker) ||
+       destination == network::mojom::RequestDestination::kWorker ||
        destination == network::mojom::RequestDestination::kSharedWorker ||
        destination == network::mojom::RequestDestination::kScript ||
        destination == network::mojom::RequestDestination::kServiceWorker)) {
@@ -350,10 +339,8 @@ bool IsPathEqualTo(const GURL& url, std::string_view test) {
 }
 
 bool IsFaviconURL(const GURL& url) {
-  return base::FeatureList::IsEnabled(
-             extensions_features::kNewExtensionFaviconHandling) &&
-         (IsPathEqualTo(url, kFaviconSourcePath) ||
-          IsPathEqualTo(url, base::StrCat({kFaviconSourcePath, "/"})));
+  return IsPathEqualTo(url, kFaviconSourcePath) ||
+         IsPathEqualTo(url, base::StrCat({kFaviconSourcePath, "/"}));
 }
 
 bool IsBackgroundPageURL(const GURL& url) {
@@ -462,6 +449,17 @@ void AddCacheHeaders(net::HttpResponseHeaders& headers,
   headers.SetHeader("cache-control", "no-cache");
 }
 
+void AddMimeTypeHeaders(net::HttpResponseHeaders& headers,
+                        const base::FilePath& file_path) {
+  std::string mime_type;
+  if (net::GetWellKnownMimeTypeFromFile(file_path, &mime_type)) {
+    headers.SetHeader(net::HttpRequestHeaders::kContentType, mime_type);
+  } else {
+    headers.SetHeader(net::HttpRequestHeaders::kContentType,
+                      "application/octet-stream");
+  }
+}
+
 class FileLoaderObserver : public content::FileURLLoaderObserver {
  public:
   explicit FileLoaderObserver(scoped_refptr<ContentVerifyJob> verify_job)
@@ -492,8 +490,9 @@ class FileLoaderObserver : public content::FileURLLoaderObserver {
         // Note: We still pass the data to |verify_job_|, even if there was a
         // read error, because some errors are ignorable. See
         // ContentVerifyJob::BytesRead() for more details.
-        verify_job_->BytesRead(static_cast<const char*>(buffer.data()),
-                               result->bytes_read, result->result);
+        verify_job_->BytesRead(
+            buffer.first(static_cast<size_t>(result->bytes_read)),
+            result->result);
       }
     }
   }
@@ -552,8 +551,6 @@ class ExtensionURLLoader : public network::mojom::URLLoader {
   }
   void SetPriority(net::RequestPriority priority,
                    int32_t intra_priority_value) override {}
-  void PauseReadingBodyFromNet() override {}
-  void ResumeReadingBodyFromNet() override {}
 
  private:
   ~ExtensionURLLoader() override = default;
@@ -609,9 +606,7 @@ class ExtensionURLLoader : public network::mojom::URLLoader {
         extensions::util::IsIncognitoEnabled(extension_id, browser_context_);
 
     // Redirect guid to id.
-    if (base::FeatureList::IsEnabled(
-            extensions_features::kExtensionDynamicURLRedirection) &&
-        extension && request_.url.host() == extension->guid()) {
+    if (extension && request_.url.host() == extension->guid()) {
       GURL::Replacements replace_host;
       replace_host.SetHostStr(extension->id());
       upstream_url_ = request_.url;
@@ -660,6 +655,12 @@ class ExtensionURLLoader : public network::mojom::URLLoader {
 
     AddCacheHeaders(*headers, last_modified_time);
 
+    // TODO(https://crbug.com/400647848): Remove this if-check and always
+    // override mime type headers in M139.
+    if (base::FeatureList::IsEnabled(kOverrideExtensionFilesMimeTypes)) {
+      AddMimeTypeHeaders(*headers, read_file_path);
+    }
+
     scoped_refptr<ContentVerifyJob> verify_job;
     if (content_verifier) {
       verify_job = ContentVerifier::CreateAndStartJobFor(
@@ -679,9 +680,7 @@ class ExtensionURLLoader : public network::mojom::URLLoader {
                           scoped_refptr<base::RefCountedMemory> bitmap_data) {
     if (bitmap_data) {
       head->mime_type = "image/bmp";
-      WriteData(std::move(head),
-                base::as_bytes(
-                    base::make_span(bitmap_data->data(), bitmap_data->size())));
+      WriteData(std::move(head), base::as_byte_span(*bitmap_data));
     } else {
       CompleteRequestAndDeleteThis(net::ERR_FAILED);
     }
@@ -773,7 +772,7 @@ class ExtensionURLLoader : public network::mojom::URLLoader {
         std::string contents;
         GenerateBackgroundPageContents(extension.get(), &head->mime_type,
                                        &head->charset, &contents);
-        WriteData(std::move(head), base::as_bytes(base::make_span(contents)));
+        WriteData(std::move(head), base::as_byte_span(contents));
       } else if (is_favicon_url) {
         tracker_ = std::make_unique<base::CancelableTaskTracker>();
         ExtensionsBrowserClient::Get()->GetFavicon(

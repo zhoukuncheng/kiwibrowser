@@ -26,14 +26,12 @@
 #include "base/command_line.h"
 #include "base/dcheck_is_on.h"
 #include "base/enterprise_util.h"
-#include "base/environment.h"
 #include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/important_file_writer_cleaner.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/i18n/rtl.h"
 #include "base/location.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
@@ -173,12 +171,10 @@ void DelayedRecordProcessorMetrics() {
 
 // Initializes the ModuleDatabase on its owning sequence. Also starts the
 // enumeration of registered modules in the Windows Registry.
-void InitializeModuleDatabase(
-    bool is_third_party_blocking_policy_enabled) {
+void InitializeModuleDatabase() {
   DCHECK(ModuleDatabase::GetTaskRunner()->RunsTasksInCurrentSequence());
 
-  ModuleDatabase::SetInstance(
-      std::make_unique<ModuleDatabase>(is_third_party_blocking_policy_enabled));
+  ModuleDatabase::SetInstance(std::make_unique<ModuleDatabase>());
 
   auto* module_database = ModuleDatabase::GetInstance();
   module_database->StartDrainingModuleLoadAttemptsLog();
@@ -486,15 +482,15 @@ int DoUninstallTasks(bool chrome_still_running) {
   // check once again after user acknowledges Uninstall dialog.
   if (chrome_still_running) {
     ShowCloseBrowserFirstMessageBox();
-    return chrome::RESULT_CODE_UNINSTALL_CHROME_ALIVE;
+    return CHROME_RESULT_CODE_UNINSTALL_CHROME_ALIVE;
   }
   int result = chrome::ShowUninstallBrowserPrompt();
   if (browser_util::IsBrowserAlreadyRunning()) {
     ShowCloseBrowserFirstMessageBox();
-    return chrome::RESULT_CODE_UNINSTALL_CHROME_ALIVE;
+    return CHROME_RESULT_CODE_UNINSTALL_CHROME_ALIVE;
   }
 
-  if (result != chrome::RESULT_CODE_UNINSTALL_USER_CANCEL) {
+  if (result != CHROME_RESULT_CODE_UNINSTALL_USER_CANCEL) {
     // The following actions are just best effort.
     VLOG(1) << "Executing uninstall actions";
     // Remove shortcuts targeting chrome.exe or chrome_proxy.exe.
@@ -724,40 +720,6 @@ void ChromeBrowserMainPartsWin::PostBrowserStart() {
 }
 
 // static
-void ChromeBrowserMainPartsWin::PrepareRestartOnCrashEnviroment(
-    const base::CommandLine& parsed_command_line) {
-  // Clear this var so child processes don't show the dialog by default.
-  std::unique_ptr<base::Environment> env(base::Environment::Create());
-  env->UnSetVar(env_vars::kShowRestart);
-
-  // For non-interactive tests we don't restart on crash.
-  if (env->HasVar(env_vars::kHeadless))
-    return;
-
-  // If the known command-line test options are used we don't create the
-  // environment block which means we don't get the restart dialog.
-  if (parsed_command_line.HasSwitch(switches::kBrowserCrashTest) ||
-      parsed_command_line.HasSwitch(switches::kNoErrorDialogs))
-    return;
-
-  // The encoding we use for the info is "title|context|direction" where
-  // direction is either env_vars::kRtlLocale or env_vars::kLtrLocale depending
-  // on the current locale.
-  std::u16string dlg_strings(
-      l10n_util::GetStringUTF16(IDS_CRASH_RECOVERY_TITLE));
-  dlg_strings.push_back('|');
-  std::u16string adjusted_string(
-      l10n_util::GetStringUTF16(IDS_CRASH_RECOVERY_CONTENT));
-  base::i18n::AdjustStringForLocaleDirection(&adjusted_string);
-  dlg_strings.append(adjusted_string);
-  dlg_strings.push_back('|');
-  dlg_strings.append(base::ASCIIToUTF16(
-      base::i18n::IsRTL() ? env_vars::kRtlLocale : env_vars::kLtrLocale));
-
-  env->SetVar(env_vars::kRestartInfo, base::UTF16ToUTF8(dlg_strings));
-}
-
-// static
 void ChromeBrowserMainPartsWin::RegisterApplicationRestart(
     const base::CommandLine& parsed_command_line) {
   base::ScopedNativeLibrary library(base::FilePath(L"kernel32.dll"));
@@ -807,7 +769,7 @@ int ChromeBrowserMainPartsWin::HandleIconsCommands(
     return content::RESULT_CODE_NORMAL_EXIT;
   }
   // We don't hide icons so we shouldn't do anything special to show them
-  return chrome::RESULT_CODE_UNSUPPORTED_PARAM;
+  return CHROME_RESULT_CODE_UNSUPPORTED_PARAM;
 }
 
 // static
@@ -972,26 +934,18 @@ void ChromeBrowserMainPartsWin::SetupModuleDatabase(
   // What truly controls if the blocking is enabled is the presence of the
   // module blocklist cache file. This means that to disable the feature, the
   // cache must be deleted and the browser relaunched.
-  if (!ModuleDatabase::IsThirdPartyBlockingPolicyEnabled() ||
-      !ModuleBlocklistCacheUpdater::IsBlockingEnabled())
+  if (!ModuleBlocklistCacheUpdater::IsBlockingEnabled()) {
     ThirdPartyConflictsManager::DisableThirdPartyModuleBlocking(
         base::ThreadPool::CreateTaskRunner(
             {base::TaskPriority::BEST_EFFORT,
              base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN,
              base::MayBlock()})
             .get());
-#endif
-
-  bool third_party_blocking_policy_enabled =
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-      ModuleDatabase::IsThirdPartyBlockingPolicyEnabled();
-#else
-      false;
+  }
 #endif
 
   ModuleDatabase::GetTaskRunner()->PostTask(
-      FROM_HERE, base::BindOnce(&InitializeModuleDatabase,
-                                third_party_blocking_policy_enabled));
+      FROM_HERE, base::BindOnce(&InitializeModuleDatabase));
 
   *module_watcher = ModuleWatcher::Create(base::BindRepeating(
       &ChromeBrowserMainPartsWin::OnModuleEvent, base::Unretained(this)));

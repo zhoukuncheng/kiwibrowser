@@ -28,8 +28,8 @@
 #include "third_party/blink/renderer/core/animation/css/css_animation_data.h"
 #include "third_party/blink/renderer/core/css/computed_style_css_value_mapping.h"
 #include "third_party/blink/renderer/core/css/css_identifier_value.h"
+#include "third_party/blink/renderer/core/css/css_identifier_value_mappings.h"
 #include "third_party/blink/renderer/core/css/css_primitive_value.h"
-#include "third_party/blink/renderer/core/css/css_primitive_value_mappings.h"
 #include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/css/css_selector.h"
 #include "third_party/blink/renderer/core/css/css_variable_data.h"
@@ -41,7 +41,6 @@
 #include "third_party/blink/renderer/core/display_lock/display_lock_document_state.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_traversal.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/pseudo_element.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
@@ -536,6 +535,11 @@ String CSSComputedStyleDeclaration::removeProperty(
       "These styles are computed, and therefore the '" + name +
           "' property is read-only.");
   return String();
+}
+
+void CSSComputedStyleDeclaration::QuietlyRemoveProperty(
+    const String& property_name) {
+  NOTREACHED();
 }
 
 const CSSValue* CSSComputedStyleDeclaration::GetPropertyCSSValueInternal(

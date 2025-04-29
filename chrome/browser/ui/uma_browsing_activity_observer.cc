@@ -78,8 +78,9 @@ void UMABrowsingActivityObserver::OnAppTerminating() const {
 void UMABrowsingActivityObserver::LogTimeBeforeUpdate() const {
   const base::Time upgrade_detected_time =
       UpgradeDetector::GetInstance()->upgrade_detected_time();
-  if (upgrade_detected_time.is_null())
+  if (upgrade_detected_time.is_null()) {
     return;
+  }
   const base::TimeDelta time_since_upgrade =
       base::Time::Now() - upgrade_detected_time;
   constexpr int kMaxDays = 30;
@@ -128,7 +129,7 @@ void UMABrowsingActivityObserver::LogBrowserTabCount() const {
       }
     }
 
-    if (browser->window()->IsActive()) {
+    if (browser->IsActive()) {
       // Record how many tabs the active window has open.
       UMA_HISTOGRAM_CUSTOM_COUNTS("Tabs.TabCountActiveWindow",
                                   browser->tab_strip_model()->count(), 1, 200,
